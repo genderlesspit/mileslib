@@ -1,5 +1,0 @@
-2025-05-05 15:42:17 - INFO - FileHandler attached: all logs will now write to the log file.
-2025-05-05 15:42:17 - INFO - config initialized at C:\Users\miles\PycharmProjects\ColdEmailer\config.
-2025-05-05 15:42:17 - INFO - config.json initialized at C:\Users\miles\PycharmProjects\ColdEmailer\config\config.json.
-2025-05-05 15:42:17 - INFO - MilesLib config settings appear to be in working order... Let's check...
-2025-05-05 15:42:17 - INFO - Config value found for dependencies: {'test': {'dep': 'test1', 'pack': 'test2,'}}

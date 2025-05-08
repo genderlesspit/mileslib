@@ -1,3 +1,0 @@
-2025-05-05 15:09:34 - INFO - FileHandler attached: all logs will now write to the log file.
-2025-05-05 15:09:34 - INFO - config initialized at C:\Users\miles\PycharmProjects\ColdEmailer\config.
-2025-05-05 15:09:34 - WARNING - C:\Users\miles\PycharmProjects\ColdEmailer\config\config.json does not exist!

@@ -1,4 +1,0 @@
-2025-05-05 14:11:55 - INFO - FileHandler attached: all logs will now write to the log file.
-2025-05-05 14:11:55 - ERROR - Crash occurred: Code.json is absent!
-2025-05-05 14:11:55 - ERROR - NoneType: None
-
