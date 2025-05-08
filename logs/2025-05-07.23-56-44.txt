@@ -1,8 +1,0 @@
-2025-05-07 23:56:44 - INFO - FileHandler attached: all logs will now write to the log file.
-2025-05-07 23:56:44 - INFO - Current version requested...
-2025-05-07 23:56:44 - ERROR - Traceback (most recent call last):
-  File "C:\Users\miles\PycharmProjects\ColdEmailer\main.py", line 152, in get_version
-    configdict = json.loads(main.github.remote_config)
-                            ^^^^
-NameError: name 'main' is not defined. Did you mean: 'self.main'?
-

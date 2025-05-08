@@ -137,6 +137,21 @@ class Main:
             log.error(traceback.format_exc())  # capture the full traceback
         raise RuntimeError(f"Program terminated. See log: {self.logfiledir}") if warn_only is not True else log.warning("Crash bypassed by function.")
 
+    def close_log(self):
+        logger = log.getLogger()
+        for handler in logger.handlers[:]:
+            if isinstance(handler, log.FileHandler):
+                handler.close()
+                logger.removeHandler(handler)
+
+    def open_log(self):
+        file_handler = log.FileHandler(self.logfiledir, encoding="utf-8")
+        file_handler.setFormatter(log.Formatter(
+            fmt='%(asctime)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        log.getLogger().addHandler(file_handler)
+
     class Github:
         def __init__(self, main, quiet: bool = None, startup: bool = False):
             self.main = main
@@ -237,6 +252,8 @@ class Main:
                     zip_url = self.repo_url.replace("raw.githubusercontent.com", "github.com").replace("/master","/archive/refs/heads/master.zip")
                     headers = {"Authorization": f"token {self.token}"} if self.token else {}
 
+                    self.main.close_log()
+
                     response = requests.get(zip_url, headers=headers, stream=True)
                     response.raise_for_status()
 
@@ -265,6 +282,7 @@ class Main:
                             else:
                                 shutil.copy2(s, d)
 
+                    self.main.open_log()
                     log.info("Full update completed successfully.")
 
                 except Exception as e:
