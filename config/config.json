@@ -1,7 +1,7 @@
 {
     "setup_complete": false,
     "local_version": "0.0.0",
-    "repo_url": "https://raw.githubusercontent.com/genderlesspit/phazedeck/main",
+    "repo_url": "https://raw.githubusercontent.com/genderlesspit/phazedeck/master",
     "token": "",
     "dependencies": {
         "flask": {
