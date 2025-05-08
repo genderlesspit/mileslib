@@ -6,6 +6,10 @@ import logging as log
 import subprocess
 import sys
 import importlib.util
+import tempfile
+import zipfile
+import shutil
+
 try:
     import requests
     from packaging import version
@@ -32,10 +36,6 @@ class Main:
         self.config_startup = self.Config(self, on_startup=True)
         self.config = self.Config(self, quiet=True)
 
-        #Github Handler
-        self.github_startup = self.Github(self, startup=True)
-        self.github = self.Github(self)
-
         #Ensure setup
         self.setup_status = self.config_startup.get("setup_complete")
         if not self.setup_status is True:
@@ -44,7 +44,7 @@ class Main:
         self.rdir = self.config_startup.get("directories", "folder")
 
         #Create Session Log
-        self.logdir = os.path.join(self.rdir, "logs")
+        self.logdir = os.path.join(self.rdir, self.config.get("directories", "logs"))
         os.makedirs(self.logdir, exist_ok=True)
         log.info(f"Log Directory: {self.logdir}")
 
@@ -55,7 +55,7 @@ class Main:
 
         #Create Quiet Config
 
-        #Filehandling
+        #Log Handler
         file_handler = log.FileHandler(self.logfiledir, encoding="utf-8")
         file_handler.setFormatter(log.Formatter(
             fmt='%(asctime)s - %(levelname)s - %(message)s',
@@ -64,8 +64,14 @@ class Main:
         log.getLogger().addHandler(file_handler)
         log.info("FileHandler attached: all logs will now write to the log file.")
 
+        #Github Handler
+        self.github = self.Github(self)
+        log.info(f"Acknowledged local version: {self.github.local_version}")
+        self.github.check(full_update=True) #Check for Updates
+
         #Ensure code.json exists
-        #self.code_json_dir = os.path.join(self.dir, "code.json")
+        self.code_json_dir = os.path.join(self.dir, self.config.get("directories", "code.json"))
+        os.path.exists(self.code_json_dir)
 
         #Flask Setup
         #self.flask()
@@ -134,7 +140,7 @@ class Main:
     class Github:
         def __init__(self, main, quiet: bool = None, startup: bool = False):
             self.main = main
-            self.update = main.Github.Update(self)
+            self.update = self.Update(self)
             self.quiet = quiet or False
             self.repo_url = self.main.config.get("repo_url")
             self.token = self.main.config.get("token")
@@ -142,25 +148,23 @@ class Main:
             self.remote_config = self.get("config", "config.json", no_save=True)
             self.remote_version = self.update.get_version()
 
-            if startup is True:
-                log.info(f"Acknowledged local version: {self.local_version}")
-
         class Update:
             def __init__(self, main):
                 self.main = main
 
             def get_version(self):
-                log.info("Current version requested...")
+                log.info("Current Github version requested...")
                 try:
                     configdict = json.loads(self.main.remote_config)
-                    return configdict.get("local_version")
+                    ver = configdict.get("local_version")
+                    log.info(f"Current Github version is {ver}")
+                    return ver
                 except Exception as e:
                     self.main.main.crash(f"Could not retrieve remote version: {e}")
 
             def check(self):
-                log.info("Github version requested...")
-                if version.parse(self.main.github.remote_version) > version.parse(self.main.github.local_version):
-                    log.info(f"Github release available: {self.main.github.remote_version} (current: {self.main.github.local_version})")
+                if version.parse(self.main.remote_version) > version.parse(self.main.local_version):
+                    log.info(f"Github release available: {self.main.remote_version} (current: {self.main.local_version})")
                     return True
                 else:
                     log.info("No available updates.")
@@ -228,9 +232,44 @@ class Main:
             can_full_update = self.update.check()
             def install_full_update():
                 try:
-                    pass
-                except Exception as cannot_check:
-                    self.main.crash(f"Github update  failed: {cannot_check}", warn_only=True)
+                    log.info("Beginning full update from GitHub repository...")
+
+                    zip_url = self.repo_url.replace("raw.githubusercontent.com", "github.com").replace("/master","/archive/refs/heads/master.zip")
+                    headers = {"Authorization": f"token {self.token}"} if self.token else {}
+
+                    response = requests.get(zip_url, headers=headers, stream=True)
+                    response.raise_for_status()
+
+                    with tempfile.TemporaryDirectory() as tempdir:
+                        zip_path = os.path.join(tempdir, "repo.zip")
+                        with open(zip_path, "wb") as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+
+                        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                            zip_ref.extractall(tempdir)
+
+                        repo_dir_name = next(
+                            name for name in os.listdir(tempdir) if os.path.isdir(os.path.join(tempdir, name)))
+                        extracted_path = os.path.join(tempdir, repo_dir_name)
+
+                        log.info(f"Replacing files in {self.main.dir} with contents from repo...")
+                        for item in os.listdir(extracted_path):
+                            s = os.path.join(extracted_path, item)
+                            d = os.path.join(self.main.dir, item)
+
+                            if os.path.isdir(s):
+                                if os.path.exists(d):
+                                    shutil.rmtree(d)
+                                shutil.copytree(s, d)
+                            else:
+                                shutil.copy2(s, d)
+
+                    log.info("Full update completed successfully.")
+
+                except Exception as e:
+                    self.main.crash(f"Full update from GitHub failed: {e}", warn_only=True)
+
             install_full_update() if can_full_update is True else None
 
     class Config:
@@ -246,10 +285,9 @@ class Main:
                 #Default config settings
                 if not self.main.file_exists(f"{self.cdir}", "config.json", disp="config.json", quiet=self.quiet, startup=True ):
                     dconfig = {
-                        "setup_complete": False,
+                        "setup_complete": True,
                         "local_version": "0.0.0",
-                        "remote_version": "0.0.0",
-                        "repo_url": "https://raw.githubusercontent.com/genderlesspit/phazedeck/main",
+                        "repo_url": "https://raw.githubusercontent.com/genderlesspit/phazedeck/master",
                         "token": "",
                         "dependencies": {
                             "flask": {
@@ -263,10 +301,12 @@ class Main:
                             "packaging": {
                                 "dep": "packaging",
                                 "pack": "packaging"
-                            },
+                            }
                         },
                         "directories": {
-                            "folder": f"{self.main.dir}"
+                            "folder": "C:\\Users\\miles\\PycharmProjects\\ColdEmailer",
+                            "logs":"logs",
+                            "code.json": "config\\code_template.json"
                         }
                     }
                     with open(self.config_dir, "w", encoding="utf-8") as f:
