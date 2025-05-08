@@ -15,6 +15,10 @@
         "packaging": {
             "dep": "packaging",
             "pack": "packaging"
+        },
+        "hashlib": {
+            "dep": "hashlib",
+            "pack": "hashlib"
         }
     },
     "directories": {

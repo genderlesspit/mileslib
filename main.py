@@ -9,8 +9,11 @@ import importlib.util
 import tempfile
 import zipfile
 import shutil
+from time import perf_counter
+import io
 
 try:
+    import hashlib
     import requests
     from packaging import version
 except Exception as e:
@@ -129,13 +132,45 @@ class Main:
             return False
 
     def crash(self, e: str = None, warn_only: bool = None, quiet: bool = None):
-        error_message = e
-        if quiet:
-            error_class = "Crash" if warn_only is not False else "Error"
-            log.error(f"{error_class} occurred: {e}") if error_message else log.error(f"{error_class} occurred!")
+        error_trace = traceback.format_exc()
+        log.error(error_trace if not quiet else f"Crash occurred: {e}")
+
+        try:
+            log_path = self.logfiledir
+            metadata = {
+                "version": self.config.get("local_version"),
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "platform": sys.platform,
+                "exception": str(e) or "No error string provided",
+                "traceback": error_trace
+            }
+
+            # Upload crash log
+            response, info = self.upload(
+                url="https://your-crash-endpoint.com/report",  # <-- Replace this
+                filepaths=[log_path],
+                fields={"metadata": json.dumps(metadata)},
+                message="Uploading crash report"
+            )
+
+            if response:
+                log.info("Crash report uploaded successfully.")
+                log.debug(f"Upload metadata: {json.dumps(info, indent=2)}")
+            else:
+                log.warning("Crash report upload failed or returned no response.")
+
+        except Exception as send_err:
+            log.warning(f"Failed to send crash report: {send_err}")
+
+        if warn_only is not True:
+            raise RuntimeError(f"Program terminated. See log: {self.logfiledir}")
         else:
-            log.error(traceback.format_exc())  # capture the full traceback
-        raise RuntimeError(f"Program terminated. See log: {self.logfiledir}") if warn_only is not True else log.warning("Crash bypassed by function.")
+            log.warning("Crash bypassed by function.")
+
+    def restart(self):
+        log.info("Restarting application...")
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
 
     def close_log(self):
         logger = log.getLogger()
@@ -152,6 +187,138 @@ class Main:
         ))
         log.getLogger().addHandler(file_handler)
 
+    def timer(self, fn, *args, **kwargs):
+        start = perf_counter()
+        result = fn(*args, **kwargs)
+        duration = perf_counter() - start
+        log.info(f"Execution time: {duration:.2f}s")
+        return result, duration
+
+    def attempt(self, fn, max_retries=3, backoff=2, retry_on=Exception, delay_func=None, message: str=None):
+        import time
+
+        for attempt_num in range(1, max_retries + 1):
+            try:
+                logmsg = f"Attempt {attempt_num}..."
+                log.info(f"{message}: {logmsg}") if message else log.info(f"{logmsg}")
+                return fn()
+            except retry_on as e:
+                log.warning(f"Attempt {attempt_num} failed: {e}")
+                if attempt_num < max_retries:
+                    wait = delay_func(attempt_num) if delay_func else backoff * attempt_num
+                    log.info(f"Retrying in {wait} seconds...")
+                    time.sleep(wait)
+                else:
+                    log.error(f"All {max_retries} attempts failed.")
+                    raise
+
+    def request(self, url, method="GET", headers=None, data=None, json_data=None, files=None,
+                as_text=True, timeout=(5, 10), retry_on_status=(500, 502, 503, 504), message: str = None):
+
+        def request_fn():
+            response = requests.request(
+                method=method.upper(),
+                url=url,
+                headers=headers,
+                data=data,
+                json=json_data,
+                files=files,
+                timeout=timeout
+            )
+            if response.status_code in retry_on_status:
+                raise requests.HTTPError(f"Retryable status: {response.status_code}")
+            return response
+
+        response, duration = self.timer(lambda: self.attempt(request_fn, message=message))
+        log.info(f"Request to {url} succeeded in {duration:.2f}s with status {response.status_code}")
+        return response.text if as_text else response.content
+
+    def is_valid_file_size(self, path: str, max_size_mb: float) -> bool:
+        """Check if the file or folder at `path` is below the size limit."""
+        total_size = 0
+
+        if os.path.isfile(path):
+            total_size = os.path.getsize(path)
+        elif os.path.isdir(path):
+            for dirpath, dirnames, filenames in os.walk(path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+
+        size_mb = total_size / (1024 * 1024)
+        log.info(f"Computed size for {path}: {size_mb:.2f} MB")
+        return size_mb <= max_size_mb
+
+    def compute_sha256(buffer: bytes) -> str:
+        """Compute SHA-256 hash of in-memory buffer."""
+        hasher = hashlib.sha256()
+        hasher.update(buffer)
+        return hasher.hexdigest()
+
+    def build_payload(self, filepaths: list[str] = None, dirs: list[str] = None,
+                      max_size_mb: float = 10.0, archive_name: str = "data.zip") -> tuple:
+        """Zips files and directories into an in-memory archive for upload."""
+
+        log_buffer = io.BytesIO()
+        with zipfile.ZipFile(log_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for path in filepaths or []:
+                if os.path.isfile(path):
+                    if not self.is_valid_file_size(path, max_size_mb):
+                        raise ValueError(f"File exceeds {max_size_mb}MB: {path}")
+                    zipf.write(path, arcname=os.path.basename(path))
+                else:
+                    log.warning(f"Skipping invalid file: {path}")
+
+            for folder in dirs or []:
+                if os.path.isdir(folder):
+                    if not self.is_valid_file_size(folder, max_size_mb):
+                        raise ValueError(f"Directory exceeds {max_size_mb}MB: {folder}")
+                    for root, _, files in os.walk(folder):
+                        for file in files:
+                            abs_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(abs_path, start=folder)
+                            arcname = os.path.join(os.path.basename(folder), rel_path)
+                            zipf.write(abs_path, arcname=arcname)
+                else:
+                    log.warning(f"Skipping invalid directory: {folder}")
+
+        log_buffer.seek(0)
+        archive_bytes = log_buffer.getvalue()
+        hash_value = compute_sha256(archive_bytes)
+        size_kb = round(len(archive_bytes) / 1024, 2)
+
+        files = {
+            'archive': (archive_name, io.BytesIO(archive_bytes), 'application/zip')
+        }
+        metadata = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "archive_name": archive_name,
+            "archive_size_kb": size_kb,
+            "sha256": hash_value
+        }
+
+        return files, metadata
+
+    def upload(self, url: str, filepaths: list[str] = None, dirs: list[str] = None, fields: dict = None,
+               headers: dict = None, max_size_mb: float = 10.0, message: str = None) -> tuple[str, dict] | None:
+        """Uploads zipped files/dirs via POST. Returns (response_text, metadata) or None."""
+        try:
+            files, metadata = self.build_payload(filepaths=filepaths, dirs=dirs, max_size_mb=max_size_mb)
+            response = self.request(
+                url=url,
+                method="POST",
+                headers=headers,
+                data=fields,
+                files=files,
+                as_text=True,
+                message=message or "Uploading data"
+            )
+            return response, metadata
+        except Exception as e:
+            log.error(f"Upload failed: {e}")
+            return None
+
     class Github:
         def __init__(self, main, quiet: bool = None, startup: bool = False):
             self.main = main
@@ -161,11 +328,16 @@ class Main:
             self.token = self.main.config.get("token")
             self.local_version = self.main.config.get("local_version") or "0.0.0"
             self.remote_config = self.get("config", "config.json", no_save=True)
-            self.remote_version = self.update.get_version()
+
+            # Get remote version *after* pulling the remote config
+            if not self.remote_config:
+                raise ValueError("Remote config is None. Cannot parse.")
+            else:
+                self.remote_version = self.update.get_version()
 
         class Update:
-            def __init__(self, main):
-                self.main = main
+            def __init__(self, github):
+                self.main = github
 
             def get_version(self):
                 log.info("Current Github version requested...")
@@ -210,9 +382,9 @@ class Main:
             headers = {"Authorization": f"token {self.token}"} if token and self.token else {}
 
             try:
-                response = requests.get(full_url, headers=headers)
-                response.raise_for_status()
-                content = response.text if as_text else response.content
+                content = self.main.request(full_url, headers=headers, as_text=as_text, message="Retrieving from Github")
+                if content is None:
+                    return None
 
                 def save():
                     def save_to_default_path():
@@ -237,7 +409,11 @@ class Main:
 
                     return save_as_file() if save_as else save_to_default_path()
 
-                return content if no_save else save()
+                if no_save:
+                    log.info(f"Request for {full_url} fulfilled successfully.")
+                    return content
+                else:
+                    return save()
 
             except Exception as cannot_get:
                 log.warning(f"Failed to retrieve file from {full_url}: {cannot_get}")
@@ -284,9 +460,10 @@ class Main:
 
                     self.main.open_log()
                     log.info("Full update completed successfully.")
+                    self.main.restart()
 
                 except Exception as e:
-                    self.main.crash(f"Full update from GitHub failed: {e}", warn_only=True)
+                    self.main.crash(f"Full update from GitHub failed: {e}")
 
             install_full_update() if can_full_update is True else None
 
