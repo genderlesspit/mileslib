@@ -1,0 +1,4 @@
+2025-05-05 14:56:47 - INFO - FileHandler attached: all logs will now write to the log file.
+2025-05-05 14:56:47 - INFO - C:\Users\miles\PycharmProjects\ColdEmailer\flask initialized.
+2025-05-05 14:56:47 - INFO - C:\Users\miles\PycharmProjects\ColdEmailer\flask\flask.py initialized.
+2025-05-05 14:56:47 - INFO - Flask app already exists.

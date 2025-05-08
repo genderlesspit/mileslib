@@ -1,0 +1,23 @@
+{
+    "setup_complete": false,
+    "local_version": "0.0.0",
+    "repo_url": "https://raw.githubusercontent.com/genderlesspit/phazedeck/main",
+    "token": "",
+    "dependencies": {
+        "flask": {
+            "dep": "flask",
+            "pack": "flask"
+        },
+        "requests": {
+            "dep": "requests",
+            "pack": "requests"
+        },
+        "packaging": {
+            "dep": "packaging",
+            "pack": "packaging"
+        }
+    },
+    "directories": {
+        "folder": "C:\\Users\\miles\\PycharmProjects\\ColdEmailer"
+    }
+}

@@ -1,0 +1,10 @@
+2025-05-05 14:30:04 - INFO - FileHandler attached: all logs will now write to the log file.
+2025-05-05 14:30:04 - INFO - C:\Users\miles\PycharmProjects\ColdEmailer\flask initialized.
+2025-05-05 14:30:04 - WARNING - C:\Users\miles\PycharmProjects\ColdEmailer\flask\flask.py does not exist!
+2025-05-05 14:30:04 - ERROR - Crash occurred: 'Main' object has no attribute 'flaskappdir'
+2025-05-05 14:30:04 - ERROR - Traceback (most recent call last):
+  File "C:\Users\miles\PycharmProjects\ColdEmailer\main.py", line 80, in flask
+    with open(self.flaskappdir, "w", encoding="utf-8") as f:
+              ^^^^^^^^^^^^^^^^
+AttributeError: 'Main' object has no attribute 'flaskappdir'
+
