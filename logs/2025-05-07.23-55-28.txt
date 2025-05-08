@@ -1,0 +1,8 @@
+2025-05-07 23:55:28 - INFO - FileHandler attached: all logs will now write to the log file.
+2025-05-07 23:55:28 - INFO - Current version requested...
+2025-05-07 23:55:28 - ERROR - Traceback (most recent call last):
+  File "C:\Users\miles\PycharmProjects\ColdEmailer\main.py", line 152, in get_version
+    configdict = json.loads(self.main.remote_config)
+                            ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Github' object has no attribute 'remote_config'
+
