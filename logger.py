@@ -6,15 +6,21 @@ class Log:
         self.m = mileslib
         self.quiet = quiet
         self.dir = os.path.join(dir, "logs")
-        self.file = os.path.join(dir, "logs", f"{self.m.launch_time}")
-        self.handler = None
+        self.filename = f"{self.m.timestamp}.txt"
+        self.file, self.file_exists = self.m.exists("logs", self.filename, create_if_missing=True, quiet=True)
         self.initialized = False
-        # Initialize Logging
-        log.basicConfig(
-            level=log.INFO,
-            format='%(asctime)s - MILESLIB - %(levelname)s - %(message)s',
+        self.handler = None
+
+        for handler in log.root.handlers[:]:
+            log.root.removeHandler(handler)
+
+        stream_handler = log.StreamHandler()
+        stream_handler.setFormatter(log.Formatter(
+            fmt='%(asctime)s - MILESLIB - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
-        )
+        ))
+        log.getLogger().addHandler(stream_handler)
+        log.getLogger().setLevel(log.INFO)
 
     def open_log(self):
         """Attach file handler for log file output."""
@@ -41,13 +47,13 @@ class Log:
                 logger.removeHandler(handler)
 
     def info(self, message, quiet: bool = None):
-        if not (self.quiet if quiet is None else quiet):
+        if quiet is False or (quiet is None and not self.quiet):
             log.info(message)
 
     def warning(self, message, quiet: bool = None):
-        if not (self.quiet if quiet is None else quiet):
+        if quiet is False or (quiet is None and not self.quiet):
             log.warning(message)
 
     def error(self, message, quiet: bool = None):
-        if not (self.quiet if quiet is None else quiet):
+        if quiet is False or (quiet is None and not self.quiet):
             log.warning(message)

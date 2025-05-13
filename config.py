@@ -1,7 +1,5 @@
 import json
 import os
-from gettext import install
-
 
 class Config:
     def __init__(self, mileslib, dir: str, quiet: bool = None):
@@ -9,6 +7,17 @@ class Config:
         self.quiet = quiet or False
         self.dir = os.path.join(dir, "config")
         self.file = os.path.join(self.dir, "config.json")
+
+        if not os.path.exists(self.file):
+            os.makedirs(self.dir, exist_ok=True)
+            with open(self.file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "local_version": "0.0.0",
+                    "repo_url": "https://raw.githubusercontent.com/your/repo/master",
+                    "token": "",
+                    "dependencies": {}
+                }, f, indent=2)
+            self.m.github.get("config", "config.json")
 
     def install_all_dependencies(self):
         try:
@@ -63,5 +72,7 @@ class Config:
                     return None  # Key dir not found
             return current  # Final value
 
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid JSON in {self.file}: {e}")
         except Exception as e:
-            raise RuntimeError
+            raise RuntimeError(f"Unexpected error reading {self.file}: {e}")

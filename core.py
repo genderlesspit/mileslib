@@ -12,6 +12,7 @@ import io
 from config import Config
 from logger import Log
 from github import Github
+from testmanager import TestManager
 
 try:
     import hashlib
@@ -25,9 +26,13 @@ class MilesLib:
         self.quiet = quiet
         self.dir = os.getcwd()
         self.launch_time = datetime.utcnow()
+        self.timestamp = self.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
         self.log = Log(self, dir=self.dir)
+        self.log.open_log()
         self.config = Config(self, dir=self.dir)
         self.github = Github(self, dir=self.dir)
+        self.test = TestManager(self, dir=self.dir)
+        self.test.discover()
 
     def dependency(self, dep: str, pack: str = None):
         try:
@@ -51,14 +56,15 @@ class MilesLib:
             quiet: bool = False,
             startup: bool = None,
             create_if_missing: bool = False
-    ):
+    ) -> tuple[str, bool]:
+
         path = os.path.join(self.dir, *args)
         exists = os.path.exists(path)
 
         if exists:
             if not quiet:
-                self.log.info(f"{disp or 'Path'} initialized at {path}.", quiet=quiet)
-            return True
+                log.info(f"{disp or 'Path'} initialized at {path}.")
+            return path, True
 
         # Handle missing path
         if create_if_missing:
@@ -68,55 +74,58 @@ class MilesLib:
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     with open(path, "w", encoding="utf-8") as f:
                         f.write("")
-                    self.log.info(f"File created: {path}", quiet=quiet)
+                    log.info(f"File created: {path}")
                 else:
                     # Assume it's a directory
                     os.makedirs(path, exist_ok=True)
-                    self.log.info(f"Directory created: {path}", quiet=quiet)
-                return True
+                    log.info(f"Directory created: {path}")
+                return path, True
             except Exception as e:
-                self.log.error(f"Failed to create {disp or 'path'}: {e}", quiet=quiet)
-                return False
+                log.error(f"Failed to create {disp or 'path'}: {e}")
+                return path, False
         else:
             if not quiet:
-                self.log.warning(f"{disp or 'Path'} not found at {path}!", quiet=quiet)
-            return False
+                log.warning(f"{disp or 'Path'} not found at {path}!")
+            return path, False
 
     def crash(self, e: str = None, warn_only: bool = None, quiet: bool = None):
         error_trace = traceback.format_exc()
-        log.error(error_trace if not quiet else f"Crash occurred: {e}")
+        self.log.error(f"Crash occurred: {e}", quiet=quiet)
 
-        try:
-            log_path = self.log.file
-            metadata = {
-                "version": self.config.get("local_version"),
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-                "platform": sys.platform,
-                "exception": str(e) or "No error string provided",
-                "traceback": error_trace,
-            }
+        #try:
+        #    log_path = self.log.file
+        #    metadata = {
+        #        "version": self.config.get("local_version"),
+        #        "timestamp": datetime.utcnow().isoformat() + "Z",
+        #        "platform": sys.platform,
+        #        "exception": str(e) or "No error string provided",
+        #        "traceback": error_trace,
+        #    }
+        #
+        #    # Upload crash log
+        #    response, info = self.upload(
+        #        url="https://your-crash-endpoint.com/report",  # <-- Replace this
+        #        filepaths=[log_path],
+        #        fields={"metadata": json.dumps(metadata)},
+        #        message="Uploading crash report"
+        #    )
+        #
+        #    if response:
+        #        log.info("Crash report uploaded successfully.")
+        #        log.debug(f"Upload metadata: {json.dumps(info, indent=2)}")
+        #    else:
+        #        log.warning("Crash report upload failed or returned no response.")
+        #
+        #
 
-            # Upload crash log
-            response, info = self.upload(
-                url="https://your-crash-endpoint.com/report",  # <-- Replace this
-                filepaths=[log_path],
-                fields={"metadata": json.dumps(metadata)},
-                message="Uploading crash report"
-            )
+        #except Exception as send_err:
+        #    log.warning(f"Failed to send crash report: {send_err}"
+        #
 
-            if response:
-                log.info("Crash report uploaded successfully.")
-                log.debug(f"Upload metadata: {json.dumps(info, indent=2)}")
-            else:
-                log.warning("Crash report upload failed or returned no response.")
-
-        except Exception as send_err:
-            log.warning(f"Failed to send crash report: {send_err}")
-
-        if warn_only is not True:
-            raise RuntimeError(f"Program terminated. See log: {log_path}")
-        else:
-            log.warning("Crash bypassed by function.")
+        #if warn_only is not True:
+        #    raise RuntimeError(f"Program terminated. See log: {log_path}")
+        #else:
+        #    log.warning("Crash bypassed by function.")
 
     def restart(self):
         log.info("Restarting application...")
@@ -274,4 +283,4 @@ class MilesLib:
 
 if __name__ == "__main__":
     #Miles Lib Instance
-    MilesLib()
+    m = MilesLib()
