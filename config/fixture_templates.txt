@@ -1,0 +1,13 @@
+# Auto-generated class-based fixtures for {{ module_name }}
+
+import pytest
+from {{ module_name }} import {{ classes | join(', ') }}
+
+{% for class_name in classes %}
+@pytest.fixture
+def {{ class_name.lower() }}():
+    """
+    Fixture for {{ class_name }} from {{ module_name }}
+    """
+    return {{ class_name }}()  # TODO: add constructor args if needed
+{% endfor %}

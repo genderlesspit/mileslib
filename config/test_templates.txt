@@ -1,0 +1,9 @@
+# Auto-generated test for {{ class_name }}.{{ method_name }} in {{ module_name }}
+
+import pytest
+from {{ module_name }} import {{ class_name }}
+
+class Test{{ class_name }}:
+    def test_{{ method_name }}(self):
+        # TODO: test {{ class_name }}.{{ method_name }}
+        pass

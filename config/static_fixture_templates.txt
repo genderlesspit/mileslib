@@ -1,0 +1,13 @@
+# Auto-generated static file fixtures (e.g. templates, configs)
+
+import pytest
+from pathlib import Path
+
+{% for f in static_files %}
+@pytest.fixture(scope="session")
+def {{ f.name }}():
+    """
+    Fixture pointing to {{ f.relpath }}
+    """
+    return Path("{{ f.relpath }}")
+{% endfor %}
