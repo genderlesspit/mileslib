@@ -3,14 +3,12 @@ import json
 import os
 from pathlib import Path
 from core import MilesLib
-import staticmethods as sm
+from staticmethods import StaticMethods as sm
 
 class Main:
     def __init__(self, pdir = None):
         self.sm = sm #Static Methods
         self.pdir = pdir
-
-
 
 class Config:
     def __init__(self, inst):
@@ -18,28 +16,56 @@ class Config:
         Initializes the Config class for the client. A subclass of the main MilesLib instance.
         Validates the incoming instance and its directory before proceeding.
         """
-        self.m._validate_instance(inst=inst)
+        sm.validate_instance(inst=inst)
         self.m = inst
-        self.pdir = self.m._validate_instance_directory(pdir=self.m.pdir)
+        self.pdir = sm.validate_instance_directory(pdir=self.m.pdir)
 
         # Directory Initialization
         self.cfg_dir = os.path.join(self.pdir, "config")
-        self.m._validate_directory(self.cfg_dir)
-        self.cfg_file = os.path.join(self.cfg_dir, "config.json")
-        self.m._validate_file(self.cfg_file)
-        self.cfg_file = self.m._ensure_file_with_default(
-            "config/config.json",
-            default={"app_name": "MilesApp", "version": "1.0"}
-        )
+        sm.validate_directory(self.cfg_dir)
+        self.cfg_file = self.build_config(self.pdir)
 
-    #For External Use
-    def get(self, *args: str):
-        setting_path = list(args)
+    @staticmethod
+    def build_config(pdir):
+        file = os.path.join(pdir, "config.json")
+        if os.path.exists(file):
+            build: Path = sm.validate_file(file)
+            return build
+        else:
+            build: Path = sm.ensure_file_with_default("config/config.json",
+                                                        default={"app_name": "MilesApp", "version": "1.0"})
+            return build
+
+    def get(self, *args: str | list | tuple):
+        file = self.cfg_file
+        for arg in args:
+            if not isinstance(arg, (str, int)):
+                raise TypeError(f"Invalid path for config.get(): {arg!r} must be str, list, or int")
+
+        def load_and_traverse():
+            if os.stat(file).st_size == 0:
+                sm.ensure_file_with_default("config/config.json",
+                                                        default={"app_name": "MilesApp", "version": "1.0"})
+            with open(file, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+
+            return sm.traverse_dictionary(config_data, *args)
+
         try:
-            with open(self.cfg_file, "r", encoding="utf-8") as f:
-                settings = json.load(f)
+            setting = sm.recall(
+                fn=load_and_traverse,
+                max_attempts=3,
+                handled_exceptions=(json.JSONDecodeError, FileNotFoundError)
+            )
+
+            if setting is None:
+                raise Exception(f"Requested setting not found in {file}. Please amend.")
+            return setting
+
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid JSON in {file}: {e}")
         except Exception as e:
-            pass
+            raise RuntimeError(f"Unexpected error reading {file}: {e}")
 
 ##TESTING##
 
@@ -80,14 +106,16 @@ def test_config_get_reads_json(config_class):
     '''
     assert config_class.get("app_name") == "MilesApp"
     assert config_class.get("version") == "1.0"
-    assert config_class.get("nonexistent") is None
+    # Expect an error when a key does not exist
+    with pytest.raises(RuntimeError):
+        config_class.get("nonexistent")
 
 def test_config_get_input_is_not_path(config_class):
     '''
     Tests whether get() can handle TypeErrors
     :param config_class Instance of Config()
     '''
-    with pytest.raises(TypeError):
+    with pytest.raises(RuntimeError):
         config_class.get(123)
     with pytest.raises(TypeError):
         config_class.get(None)
@@ -97,20 +125,37 @@ def test_config_get_input_is_not_path(config_class):
 
     def get(self, *args):
         return setting
+
 def test_config_get_json_breaks(config_class):
     '''
-    Tests an error in the json retrieval, maybe a syntax error...
+    Tests whether get() raises an error when the JSON content is malformed.
     '''
-    pass
+    # Overwrite config file with invalid JSON
+    with open(config_class.cfg_file, "w", encoding="utf-8") as f:
+        f.write("{ invalid json ")
+
+    with pytest.raises(RuntimeError, match="Invalid JSON"):
+        config_class.get("app_name")
+
 
 def test_config_get_cfg_file_not_found(config_class):
     '''
-    Tests whether the get function can handle requests when the config file is not found.
-    :return:
+    Tests whether get() raises an error when the config file is missing.
     '''
-    pass
+    os.remove(config_class.cfg_file)
 
-def test_config_get_unknown_error(config_class):
+    with pytest.raises(RuntimeError, match="Unexpected error reading"):
+        config_class.get("app_name")
+
+
+def test_config_get_unknown_error(config_class, monkeypatch):
     '''
-    Tests whether the get function can handle a miscellaneous error.
+    Tests whether get() can handle a miscellaneous, unexpected error.
     '''
+    def raise_weird_error():
+        raise ValueError("Weird stuff")
+
+    monkeypatch.setattr("staticmethods.StaticMethods.recall", lambda *a, **kw: raise_weird_error())
+
+    with pytest.raises(RuntimeError, match="Unexpected error reading"):
+        config_class.get("app_name")
