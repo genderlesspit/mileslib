@@ -1,13 +1,14 @@
-# Auto-generated static file fixtures (e.g. templates, configs)
+# Auto-generated static-file fixtures
 
 import pytest
 from pathlib import Path
 
 {% for f in static_files %}
-@pytest.fixture(scope="session")
-def {{ f.name }}():
+{% set safe_name = f.name | replace('-', '_') | replace(' ', '_') | replace('.', '_') | lower %}
+@pytest.fixture(scope="session", name="{{ safe_name }}")
+def _fixture_{{ loop.index }}():
+    r"""
+    Path to {{ f.relpath }}
     """
-    Fixture pointing to {{ f.relpath }}
-    """
-    return Path("{{ f.relpath }}")
+    return Path("{{ f.relpath | replace('\\', '/') }}")
 {% endfor %}

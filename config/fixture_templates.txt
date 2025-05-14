@@ -1,13 +1,20 @@
-# Auto-generated class-based fixtures for {{ module_name }}
+# Auto-generated class-based fixtures
+
+import sys
+import os
+# ensure project root is on sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 
 import pytest
-from {{ module_name }} import {{ classes | join(', ') }}
+
+{# strip any 'mileslib.' prefix from module names #}
+{% set import_module = module_name | replace('mileslib.', '') %}
 
 {% for class_name in classes %}
-@pytest.fixture
-def {{ class_name.lower() }}():
-    """
-    Fixture for {{ class_name }} from {{ module_name }}
-    """
-    return {{ class_name }}()  # TODO: add constructor args if needed
+from {{ import_module }} import {{ class_name }}
+
+@pytest.fixture(name="{{ class_name | lower }}")
+def fixture_{{ class_name | lower }}():
+    """Fixture for {{ class_name }}"""
+    return {{ class_name }}()
 {% endfor %}

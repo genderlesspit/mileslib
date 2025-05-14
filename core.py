@@ -76,7 +76,7 @@ class MilesLib:
                         f.write("")
                     log.info(f"File created: {path}")
                 else:
-                    # Assume it's a directory
+                    # Assume it's a dir
                     os.makedirs(path, exist_ok=True)
                     log.info(f"Directory created: {path}")
                 return path, True

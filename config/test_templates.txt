@@ -1,9 +1,18 @@
 # Auto-generated test for {{ class_name }}.{{ method_name }} in {{ module_name }}
 
+import sys
+import os
+# ensure project root is on sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+
 import pytest
-from {{ module_name }} import {{ class_name }}
+{# strip any 'mileslib.' prefix from module names #}
+{% set import_module = module_name | replace('mileslib.', '') %}
+from {{ import_module }} import {{ class_name }}
 
 class Test{{ class_name }}:
-    def test_{{ method_name }}(self):
-        # TODO: test {{ class_name }}.{{ method_name }}
+    def test_{{ method_name | replace('-', '_') }}(self):
+        """
+        TODO: implement test for {{ class_name }}.{{ method_name }}
+        """
         pass
