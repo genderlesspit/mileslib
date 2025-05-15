@@ -112,7 +112,7 @@ class Logger:
 
         self.log_dir = sm.validate_directory(self.m.pdir / "logs")
         self.class_dir = self.log_dir #alt for avoiding refactoring code
-        self.log_file_dir , was_log_file_created = sm.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
+        self.log_file_dir = self.create_log_file()
         self.logger = self.setup_structlog_logger(self.log_file_dir)
 
         #ID
@@ -127,12 +127,13 @@ class Logger:
         raise AttributeError(f"'Logger' object has no attribute '{name}'")
 
     ### Dynamic Methods ###
-    def dynamic_method(self, arg):
-        """
-        Placeholder dynamic method.
-        - Uses instance state (`self`)
-        """
-        return arg
+    def create_log_file(self):
+        was_log_file_created = False #yet....
+        try:
+            log_file_dir , was_log_file_created = sm.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
+            return Path(log_file_dir)
+        except Exception as e:
+            raise RuntimeError(f"sm.exists() is broken, could not create {e}") if was_log_file_created is False else None
 
     ### Logger Methods ###
     @classmethod

@@ -1,81 +1,56 @@
-import os
-import argparse
+#!/usr/bin/env python3
 import sys
 from pathlib import Path
-from jinja2 import Template
+import click
+from jinja2 import Environment, FileSystemLoader
 
+# point at your repo root so `from staticmethods import …` still works
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from staticmethods import StaticMethods as sm
 
-class RenderTestBoilerPlate:
+
+@click.command(context_settings={"ignore_unknown_options": True})
+@click.argument("classname", metavar="classname")
+@click.option(
+    "--mainname",
+    default="Main",
+    show_default=True,
+    help="Optional name for the main class (used for {{ mainname }})",
+)
+def render_test_boilerplate(classname: str, mainname: str):
     """
     CLI to render a Python boilerplate class from a Jinja2 template into tests/.dev/.
 
     Usage:
-        python tests/_render_test_boilerplate MyClassName --mainname Main
+      python tests/_render_test_boilerplate.py MyClassName --mainname Main
 
     This renders:
-        {pdir}/tests/_test_boilerplate.j2  →  {pdir}/tests/.dev/myclassname.py
+      {pdir}/tests/_test_boilerplate.j2  →  {pdir}/tests/.dev/test_<classname>.py
     """
+    # --- exactly your original paths: ---
+    pdir = ROOT
+    tpl_path = sm.validate_file(pdir / "tests" / "_test_boilerplate.j2")
+    out_dir  = pdir / "tests" / ".dev"
+    sm.validate_directory(out_dir)
 
-    def __init__(self, pdir: Path):
-        """
-        Args:
-            pdir (Path): The project root directory (typically `os.getcwd()`).
-        """
-        self.pdir = sm.validate_instance_directory(pdir)
-        self.args = self._parse_args()
+    # set up Jinja2 the “correct” way
+    env = Environment(
+        loader=FileSystemLoader(str(tpl_path.parent)),
+        autoescape=False,  # no HTML auto-escaping for Python code
+    )
+    template = env.get_template(tpl_path.name)
 
-        # Input template and output destination (hardcoded to project-relative paths)
-        self.template_path = sm.validate_file(self.pdir / "tests" / "_test_boilerplate.j2")
-        self.output_path = self.pdir / "tests" / ".dev" / f"test_{self.args.classname.lower()}.py"
+    rendered = template.render(
+        classname=classname,
+        mainname=mainname,
+    )
 
-        # Ensure output directory exists
-        sm.validate_directory(self.output_path.parent)
+    out_file = out_dir / f"test_{classname.lower()}.py"
+    out_file.write_text(rendered, encoding="utf-8")
+    click.echo(f"✅ Created: {out_file}")
 
-        self._render_template()
-
-    @staticmethod
-    def _parse_args():
-        """
-        Parses CLI arguments for class and main names.
-
-        Returns:
-            argparse.Namespace: Parsed arguments.
-        """
-        parser = argparse.ArgumentParser(
-            description="Render a Python class file from a Jinja2 template (into tests/.dev/)",
-            epilog="""
-Example:
-    python tests/_render_test_boilerplate.py MyNewClass --mainname Main
-Output:
-    tests/.dev/test_mynewclass.py
-"""
-        )
-        parser.add_argument(
-            "classname", help="Name of the class to generate (used for {{ classname }})"
-        )
-        parser.add_argument(
-            "--mainname", default="Main", help="Optional name for the main class (default: Main)"
-        )
-        return parser.parse_args()
-
-    def _render_template(self):
-        """
-        Loads and renders the template with provided names.
-        """
-        with self.template_path.open("r", encoding="utf-8") as f:
-            template = Template(f.read())
-
-        rendered = template.render(
-            classname=self.args.classname,
-            mainname=self.args.mainname
-        )
-
-        self.output_path.write_text(rendered, encoding="utf-8")
-        print(f"✅ Created: {self.output_path}")
 
 if __name__ == "__main__":
-    RenderTestBoilerPlate(pdir=Path(os.getcwd()))
+    render_test_boilerplate(classname=input("classname= "))

@@ -5,6 +5,8 @@ import os
 import importlib.util
 import subprocess, sys
 import logging as log
+import structlog
+import time
 
 class StaticMethods: # For Internal Use
     @staticmethod
@@ -89,15 +91,29 @@ class StaticMethods: # For Internal Use
         except Exception as e:
             return False
 
+    log = structlog.get_logger()
+
     @staticmethod
-    def timer(fn, *args, **kwargs):
-        """Time the execution duration of a function call."""
-        from time import perf_counter
-        start = perf_counter()
-        result = fn(*args, **kwargs)
-        duration = perf_counter() - start
-        log.info(f"Execution time: {duration:.2f}s")
-        return result, duration
+    def timer(label="operation"):
+        """
+        Decorator to log the duration of a function.
+
+        Usage:
+            @timer(label="fetch_data")
+            def fetch_data(): ...
+        """
+
+        def decorator(fn):
+            def wrapper(*args, **kwargs):
+                start = time.perf_counter()
+                result = fn(*args, **kwargs)
+                duration = time.perf_counter() - start
+                log.info("Timer", label=label, duration=f"{duration:.3f}s")
+                return result
+
+            return wrapper
+
+        return decorator
 
     @staticmethod
     def recall(fn: Callable, max_attempts: int = 3,

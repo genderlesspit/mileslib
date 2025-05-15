@@ -141,17 +141,17 @@ Deliverables:
 
 
 SPRINT 1
-Legend (Y) is completed, W is working, X is Not Done, ? is confused...', N is rejected/refactored
+Legend (Y) is completed, W is working, X is Not Done, ? is confused...', N is rejected/refactored, L is later
 
 Day 1 (Monday): Project Initialization + Logging
 Objective: Create the MilesLib repo and a working logging system.
 Y	Create Git repo: mileslib/
 Y	Set up folder structure:
-W	Write log.py:
-W	init_logger(log_path)
-W	log.info, log.warning, log.error
-X	Add log.txt test log file in logs/ folder
-X	Manual test: Log to file, validate timestamps and log levels
+Y	Write log.py:
+Y	init_logger(log_path)
+L	log.info, log.warning, log.error
+N	Add log.txt test log file in logs/ folder
+Y	Manual test: Log to file, validate timestamps and log levels
 ________________________________________
 Day 2 (Tuesday): Config System + Path Utilities
 Objective: Implement config loader and file/directory existence utilities.
@@ -162,7 +162,7 @@ N	validate_config(schema)
 Y	Write exists.py:
 Y	path_exists(path: Path, create_if_missing=False)
 Y	Return consistent Path object
-?	Add logging to config + path check routines
+L	Add logging to config + path check routines
 Y	Unit tests: config load success/fail, missing paths
 ________________________________________
 Day 3 (Wednesday): Request Wrapper + Timer Utility
