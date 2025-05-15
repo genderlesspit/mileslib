@@ -9,7 +9,7 @@ from pathlib import Path
 StaticMethods Utility Module
 ============================
 
-This internal utility class (`StaticMethods`) provides static helper methods used throughout
+This internal utility classname (`StaticMethods`) provides static helper methods used throughout
 MilesLib components to enforce type validation, file/directory sanity, instance hygiene,
 dependency checking, retry logic, and logging-safe operations.
 
@@ -50,7 +50,7 @@ Methods Overview
     - Supports mixed key/index access with graceful fallback.
 
 8. validate_instance(inst):
-    - Ensures an object is not None and is class-like.
+    - Ensures an object is not None and is classname-like.
     - Rejects primitives and empty placeholders.
 
 9. validate_instance_directory(pdir):
@@ -71,10 +71,10 @@ Methods Overview
 
 Usage Pattern
 -------------
-In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this class
+In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this classname
 should be accessed via dependency injection like:
 
-    class Config:
+    classname Config:
         def __init__(self, inst):
             self.m = inst
             self.sm = inst.sm
@@ -92,24 +92,24 @@ You should **never instantiate StaticMethods** — it is purely a namespace for 
 class Main:
     def __init__(self, pdir = None):
         '''
-        Parent instance of Class.
+        Parent instance of Logger.
         :param pdir: Project directory, usually os.getcwd(), unless specified by config files.
         '''
         pdir = pdir or os.getcwd()
         self.pdir = sm.validate_instance_directory(pdir=pdir)
 
-class Class:
+class Logger:
     def __init__(self, inst):
         """
-        Generic class that operates on a passed-in RenderTestBoilerplate instance.
-        :param inst Argument for instance passed through the class.
+        Logger operates on a passed-in RenderTestBoilerplate instance.
+        :param inst Argument for instance passed through the classname.
         """
         sm.validate_instance(inst=inst)
         self.m = inst
         self.pdir = self.m.pdir
 
         # Directory Initialization
-        self.class_dir = self.pdir / "Class"
+        self.class_dir = self.pdir / "Logger"
         sm.validate_directory(self.class_dir)
 
         #ID
@@ -126,12 +126,12 @@ class Class:
         """
         return arg
 
-    ### Class Methods ###
+    ### Logger Methods ###
     @classmethod
     def class_method(cls):
         """
-        Placeholder class method.
-        - Uses class reference (`cls`)
+        Placeholder classname method.
+        - Uses classname reference (`cls`)
         """
         return cls.__name__
 
@@ -173,12 +173,12 @@ class Class:
 
     def __eq__(self, other: object) -> bool:
         """
-        Check if two Class instances point to the same directory.
+        Check if two Logger instances point to the same directory.
 
         Returns:
             bool: True if same type and same path.
         """
-        return isinstance(other, Class) and self.class_dir == other.class_dir
+        return isinstance(other, Logger) and self.class_dir == other.class_dir
 
     def __len__(self) -> int:
         """
@@ -257,7 +257,7 @@ Fixtures
     - Useful for testing string methods, formatting, or casing.
 
 4. sample_object:
-    - Dummy class with a single `.value = 42` attribute.
+    - Dummy classname with a single `.value = 42` attribute.
     - Used to test generic object attribute access or mocking.
 
 5. sample_tuple:
@@ -287,35 +287,35 @@ Fixtures
 """
 
 @pytest.fixture
-def temp_class(tmp_path):
-    """Creates a Class instance with a temporary directory."""
+def temp_Logger(tmp_path):
+    """Creates a Logger instance with a temporary directory."""
     main = Main(pdir=tmp_path)
-    instance = Class(inst=main)
+    instance = Logger(inst=main)
     return instance
 
-def test_repr_returns_expected_string(temp_class):
-    result = repr(temp_class)
-    assert result.startswith("<Class path='")
-    assert str(temp_class.class_dir) in result
+def test_repr_returns_expected_string(temp_Logger):
+    result = repr(temp_Logger)
+    assert result.startswith("<Logger path='")
+    assert str(temp_Logger.class_dir) in result
 
-def test_str_returns_human_readable(temp_class):
-    expected_prefix = f"Class at '{temp_class.class_dir}' with"
-    assert str(temp_class).startswith(expected_prefix)
+def test_str_returns_human_readable(temp_Logger):
+    expected_prefix = f"Logger at '{temp_Logger.class_dir}' with"
+    assert str(temp_Logger).startswith(expected_prefix)
 
-def test_bool_true_when_valid_dir(temp_class):
-    assert bool(temp_class) is True
+def test_bool_true_when_valid_dir(temp_Logger):
+    assert bool(temp_Logger) is True
 
 def test_bool_false_when_path_deleted(tmp_path):
     main = Main(pdir=tmp_path)
-    instance = Class(inst=main)
+    instance = Logger(inst=main)
     instance.class_dir.rmdir()
     assert bool(instance) is False
 
 def test_eq_same_path_same_object(tmp_path):
     main1 = Main(pdir=tmp_path)
     main2 = Main(pdir=tmp_path)
-    c1 = Class(inst=main1)
-    c2 = Class(inst=main2)
+    c1 = Logger(inst=main1)
+    c2 = Logger(inst=main2)
     assert c1 == c2
 
 
@@ -327,73 +327,73 @@ def test_eq_different_path_objects(tmp_path):
 
     main1 = Main(pdir=path_a)
     main2 = Main(pdir=path_b)
-    c1 = Class(inst=main1)
-    c2 = Class(inst=main2)
+    c1 = Logger(inst=main1)
+    c2 = Logger(inst=main2)
 
     assert c1 != c2
 
-def test_len_counts_files_correctly(temp_class):
-    temp_class.refresh()  # Ensure accurate baseline
-    initial_count = len(temp_class)
+def test_len_counts_files_correctly(temp_Logger):
+    temp_Logger.refresh()  # Ensure accurate baseline
+    initial_count = len(temp_Logger)
 
-    (temp_class.class_dir / "file1.txt").write_text("A")
-    (temp_class.class_dir / "file2.txt").write_text("B")
-    temp_class.refresh()
+    (temp_Logger.class_dir / "file1.txt").write_text("A")
+    (temp_Logger.class_dir / "file2.txt").write_text("B")
+    temp_Logger.refresh()
 
     expected = initial_count + 2
-    assert len(temp_class) == expected
+    assert len(temp_Logger) == expected
 
-def test_contains_checks_file_by_name(temp_class):
-    (temp_class.class_dir / "testfile.txt").write_text("data")
-    temp_class.refresh()
-    assert "testfile.txt" in temp_class
-    assert "nonexistent.txt" not in temp_class
+def test_contains_checks_file_by_name(temp_Logger):
+    (temp_Logger.class_dir / "testfile.txt").write_text("data")
+    temp_Logger.refresh()
+    assert "testfile.txt" in temp_Logger
+    assert "nonexistent.txt" not in temp_Logger
 
-def test_getitem_returns_path_by_index(temp_class):
-    file1 = temp_class.class_dir / "file1.txt"
-    file2 = temp_class.class_dir / "file2.txt"
+def test_getitem_returns_path_by_index(temp_Logger):
+    file1 = temp_Logger.class_dir / "file1.txt"
+    file2 = temp_Logger.class_dir / "file2.txt"
     file1.write_text("one")
     file2.write_text("two")
-    temp_class.refresh()
-    assert temp_class[0].name in {"file1.txt", "file2.txt"}
-    assert isinstance(temp_class[0], Path)
+    temp_Logger.refresh()
+    assert temp_Logger[0].name in {"file1.txt", "file2.txt"}
+    assert isinstance(temp_Logger[0], Path)
 
-def test_iter_yields_all_contents(temp_class):
+def test_iter_yields_all_contents(temp_Logger):
     files = ["a.txt", "b.txt", "c.txt"]
     for name in files:
-        (temp_class.class_dir / name).write_text("data")
-    temp_class.refresh()
-    names = [f.name for f in temp_class]
+        (temp_Logger.class_dir / name).write_text("data")
+    temp_Logger.refresh()
+    names = [f.name for f in temp_Logger]
     for name in files:
         assert name in names
 
-def test_refresh_updates_internal_file_list(temp_class):
-    temp_class.refresh()  # Ensure contents is accurate
-    initial_count = len(temp_class)
+def test_refresh_updates_internal_file_list(temp_Logger):
+    temp_Logger.refresh()  # Ensure contents is accurate
+    initial_count = len(temp_Logger)
 
-    new_file = temp_class.class_dir / "new.txt"
+    new_file = temp_Logger.class_dir / "new.txt"
     new_file.write_text("added later")
 
-    temp_class.refresh()
-    assert len(temp_class) == initial_count + 1
-    assert "new.txt" in temp_class
+    temp_Logger.refresh()
+    assert len(temp_Logger) == initial_count + 1
+    assert "new.txt" in temp_Logger
 
 ### Tests for Method ###
 
-def test_dynamic_method_returns_argument(temp_class):
+def test_dynamic_method_returns_argument(temp_Logger):
     """Ensure dynamic_method echoes the input value using instance."""
-    assert temp_class.dynamic_method("value") == "value"
-    assert temp_class.dynamic_method(123) == 123
+    assert temp_Logger.dynamic_method("value") == "value"
+    assert temp_Logger.dynamic_method(123) == 123
 
 
 def test_class_method_returns_class_name():
-    """Ensure class_method returns the name of the class as a string."""
-    result = Class.class_method()
+    """Ensure class_method returns the name of the classname as a string."""
+    result = Logger.class_method()
     assert isinstance(result, str)
-    assert result == "Class"
+    assert result == "Logger"
 
 
 def test_static_method_returns_argument():
     """Ensure static_method echoes the input value."""
-    assert Class.static_method("static") == "static"
-    assert Class.static_method(42) == 42
+    assert Logger.static_method("static") == "static"
+    assert Logger.static_method(42) == 42
