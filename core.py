@@ -127,36 +127,6 @@ class MilesLib:
         #else:
         #    log.warning("Crash bypassed by function.")
 
-    def restart(self):
-        log.info("Restarting application...")
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
-
-    def timer(self, fn, *args, **kwargs):
-        start = perf_counter()
-        result = fn(*args, **kwargs)
-        duration = perf_counter() - start
-        log.info(f"Execution time: {duration:.2f}s")
-        return result, duration
-
-    def attempt(self, fn, max_retries=3, backoff=2, retry_on=Exception, delay_func=None, message: str=None):
-        import time
-
-        for attempt_num in range(1, max_retries + 1):
-            try:
-                logmsg = f"Attempt {attempt_num}..."
-                log.info(f"{message}: {logmsg}") if message else log.info(f"{logmsg}")
-                return fn()
-            except retry_on as e:
-                log.warning(f"Attempt {attempt_num} failed: {e}")
-                if attempt_num < max_retries:
-                    wait = delay_func(attempt_num) if delay_func else backoff * attempt_num
-                    log.info(f"Retrying in {wait} seconds...")
-                    time.sleep(wait)
-                else:
-                    log.error(f"All {max_retries} attempts failed.")
-                    raise
-
     def request(self, url, method="GET", headers=None, data=None, json_data=None, files=None,
                 as_text=True, timeout=(5, 10), retry_on_status=(500, 502, 503, 504), message: str = None):
 
@@ -264,22 +234,6 @@ class MilesLib:
         except Exception as e:
             log.error(f"Upload failed: {e}")
             return None
-
-    def flask(self):
-        try:
-            self.exists("flask")
-            self.flask_app_dir = os.path.join(self.dir, "flask", "flask.py")
-            #Check for existence of Flask App
-            self.flask_exists = self.exists("flask", "flask.py")
-            if not self.flask_exists:
-                with open(self.flask_app_dir, "w", encoding="utf-8") as f:
-                    f.write("#MilesLib Flask App")
-                    log.info("Flask app successfully created.")
-            else:
-                log.info("Flask app already exists.")
-
-        except Exception as e:
-            self.crash(f"{e}")
 
 if __name__ == "__main__":
     #Miles Lib Instance

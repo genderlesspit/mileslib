@@ -8,6 +8,33 @@ import logging as log
 
 class StaticMethods: # For Internal Use
     @staticmethod
+    def check_input(arg: Any, expected: Union[Type, Tuple[Type, ...]], label: str = "Input") -> None:
+        """
+        Verifies that the input matches the expected type(s). Raises TypeError if not.
+
+        Args:
+            arg (Any): The argument to check.
+            expected (Type or tuple of Types): The expected type(s) (e.g., str, dict, int).
+            label (str): Optional label for error clarity (e.g., function or variable name).
+
+        Raises:
+            TypeError: If the argument does not match any of the expected types.
+        """
+        if not isinstance(arg, expected):
+            exp_types = (
+                expected.__name__
+                if isinstance(expected, type)
+                else ", ".join(t.__name__ for t in expected)
+            )
+            raise TypeError(f"{label} must be of type {exp_types}, but got {type(arg).__name__}.")
+
+    @staticmethod
+    def restart(self):
+        log.info("Restarting application...")
+        python = sys.executable
+        os.execv(python, [python] + sys.argv)
+
+    @staticmethod
     def exists(path: Path,
                disp: str = None,
                quiet: bool = False,

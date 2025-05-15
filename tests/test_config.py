@@ -23,11 +23,11 @@ class Config:
         # Directory Initialization
         self.cfg_dir = os.path.join(self.pdir, "config")
         sm.validate_directory(self.cfg_dir)
-        self.cfg_file = self.build_config(self.pdir)
+        self.cfg_file = self.build_config(self.cfg_dir)
 
     @staticmethod
-    def build_config(pdir):
-        file = os.path.join(pdir, "config.json")
+    def build_config(cfg_dir):
+        file = os.path.join(cfg_dir, "config.json")
         if os.path.exists(file):
             build: Path = sm.validate_file(file)
             return build
