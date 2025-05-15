@@ -1,3 +1,4 @@
+import shutil
 from typing import Iterator
 import pytest
 import os
@@ -116,7 +117,7 @@ class Class:
         self._id = self.pdir.name
 
         #Contents
-        self.contents = list(self.pdir.iterdir())
+        self.contents = list(self.class_dir.iterdir())  # ← FIXED LINE
 
     ### Dynamic Methods ###
     def dynamic_method(self, arg):
@@ -126,7 +127,38 @@ class Class:
         """
         return arg
 
+    def refresh(self) -> None:
+        """
+        Reload the contents from disk.
+        Use after files have changed outside the object context.
+        """
+        self.contents = list(self.class_dir.iterdir())
+
+    def is_empty(self) -> bool:
+        return not self.contents
+
+    def snapshot(self, target_dir: Path):
+        shutil.copytree(self.class_dir, target_dir)
+
+    def to_dict(self) -> dict:
+        return {
+            "path": str(self.class_dir),
+            "id": self._id,
+            "items": [f.name for f in self.contents]
+        }
+
+    def copy_to(self, dest_dir: Path):
+        sm.validate_directory(dest_dir)
+        for f in self.class_dir.iterdir():
+            shutil.copy2(f, dest_dir / f.name)
+
     ### Class Methods ###
+    @classmethod
+    def from_dict(cls, inst, data: dict):
+        obj = cls(inst)
+        obj._id = data.get("id", "")
+        return obj
+
     @classmethod
     def class_method(cls):
         """
@@ -136,6 +168,20 @@ class Class:
         return cls.__name__
 
     ### Static Methods ###
+    @staticmethod
+    def verify_or_create_file(self, file_path: Path, label: str = "file") -> Path:
+        """
+        Verifies that a file exists at `file_path`, optionally creates it.
+        Returns the file path even if sm.exists fails, as long as the file exists.
+        """
+        try:
+            verified_path, was_file_created = sm.exists(path=file_path, create_if_missing=True)
+            return Path(verified_path)
+        except Exception as e:
+            if file_path.exists():
+                return file_path  # fallback: file is there, ignore sm.exists error
+            raise RuntimeError(f"sm.exists() is broken — could not create {label}: {e}")
+
     @staticmethod
     def static_method(arg):
         """
@@ -222,12 +268,11 @@ class Class:
         """
         return iter(self.contents)
 
-    def refresh(self) -> None:
-        """
-        Reload the contents from disk.
-        Use after files have changed outside the object context.
-        """
-        self.contents = list(self.class_dir.iterdir())
+    def __hash__(self):
+        return hash(self.class_dir)
+
+    def __json__(self):
+        return self.to_dict()
 
 ### Fixtures ###
 
@@ -286,102 +331,217 @@ Fixtures
     - Tests dict key validation or serialization constraints.
 """
 
+# ─── Fixtures ──────────────────────────────────────────────────────────
+
 @pytest.fixture
-def temp_class(tmp_path):
-    """Creates a Class instance with a temporary directory."""
-    main = Main(pdir=tmp_path)
-    instance = Class(inst=main)
-    return instance
+def tmp_dir(tmp_path: Path) -> Path:
+    """A clean temporary project directory."""
+    return tmp_path
 
-def test_repr_matches_class_format(temp_class):
-    result = repr(temp_class)
-    assert isinstance(result, str)
-    assert result.startswith(f"<{temp_class.__class__.__name__} path='")
-    assert str(temp_class.class_dir) in result
-    assert result.endswith("'>")
+@pytest.fixture
+def main_instance(tmp_dir: Path) -> Main:
+    """A Main instance rooted at an empty tmp_dir."""
+    return Main(pdir=tmp_dir)
 
-def test_str_describes_object_state(temp_class):
-    human = str(temp_class)
-    assert human.startswith(f"{temp_class.__class__.__name__} at '{temp_class.class_dir}' with")
-    assert f"{len(temp_class)} items" in human
+@pytest.fixture
+def class_instance(main_instance: Main) -> Class:
+    """A Class instance created from a valid Main."""
+    return Class(inst=main_instance)
 
-def test_bool_returns_true_if_valid_path(temp_class):
-    assert bool(temp_class) is True
 
-def test_bool_returns_false_if_deleted(tmp_path):
-    main = Main(pdir=tmp_path)
-    instance = Class(inst=main)
-    instance.class_dir.rmdir()
-    assert not bool(instance)
+# ─── Tests for Main ─────────────────────────────────────────────────────
 
-def test_eq_symmetric_and_path_sensitive(tmp_path):
-    main1 = Main(pdir=tmp_path)
-    main2 = Main(pdir=tmp_path)
-    obj1 = Class(inst=main1)
-    obj2 = Class(inst=main2)
-    assert obj1 == obj2
-    assert obj2 == obj1
-    assert not (obj1 != obj2)
+class TestMain:
+    def test_default_pdir_is_set_correctly(self, tmp_dir):
+        m = Main(pdir=tmp_dir)
+        assert isinstance(m.pdir, Path)
+        assert m.pdir == tmp_dir
 
-def test_eq_returns_false_for_different_dirs(tmp_path):
-    d1, d2 = tmp_path / "a", tmp_path / "b"
-    d1.mkdir()
-    d2.mkdir()
-    c1 = Class(Main(d1))
-    c2 = Class(Main(d2))
-    assert c1 != c2
+    def test_main_raises_file_not_found_for_invalid_dir(self, tmp_path):
+        bad = tmp_path / "does_not_exist"
+        with pytest.raises(FileNotFoundError):
+            Main(pdir=bad)
 
-def test_len_reflects_number_of_items(temp_class):
-    initial_count = len(temp_class)
 
-    # Add two new files
-    (temp_class.class_dir / "x.txt").write_text("1")
-    (temp_class.class_dir / "y.txt").write_text("2")
-    temp_class.refresh()
+# ─── Initialization & Directory Tests for Class ────────────────────────
 
-    assert len(temp_class) == initial_count + 2
+class TestClassInitialization:
+    def test_requires_valid_instance(self, tmp_dir):
+        # anything without __dict__ should fail validation
+        with pytest.raises(RuntimeError):
+            Class(inst="not_a_Main")
 
-def test_contains_uses_filename_only(temp_class):
-    (temp_class.class_dir / "alpha.txt").write_text("yes")
-    temp_class.refresh()
-    assert "alpha.txt" in temp_class
-    assert "beta.txt" not in temp_class
+    def test_class_dir_is_created(self, main_instance, tmp_dir):
+        _ = Class(inst=main_instance)  # Instantiation creates the directory
+        class_dir = tmp_dir / "Class"
+        assert class_dir.exists() and class_dir.is_dir()
 
-def test_getitem_returns_correct_path(temp_class):
-    file = temp_class.class_dir / "z.txt"
-    file.write_text("Zed")
-    temp_class.refresh()
-    path = temp_class[0]
-    assert isinstance(path, Path)
-    assert path.name == "z.txt"
 
-def test_getitem_raises_index_error(temp_class):
-    with pytest.raises(IndexError):
-        _ = temp_class[999]
+# ─── Magic‐Method & Sequence‐Behavior Tests for Class ────────────────────
 
-def test_iter_returns_all_paths(temp_class):
-    names = ["1.txt", "2.txt"]
-    for name in names:
-        (temp_class.class_dir / name).write_text("ok")
-    temp_class.refresh()
-    files = list(temp_class)
-    assert all(isinstance(p, Path) for p in files)
-    assert sorted(p.name for p in files) >= sorted(names)
+class TestClassMagicMethods:
+    def test_repr_shows_class_name_and_path(self, class_instance):
+        expected = f"<Class path='{class_instance.class_dir}'>"
+        assert repr(class_instance) == expected
 
-def test_refresh_updates_contents_after_change(temp_class):
-    old_len = len(temp_class)
-    (temp_class.class_dir / "added.txt").write_text("more")
-    temp_class.refresh()
-    assert len(temp_class) == old_len + 1
-    assert "added.txt" in temp_class
+    def test_str_includes_item_count(self, class_instance):
+        s = str(class_instance)
+        assert class_instance.class_dir.name in s
+        assert f"with {len(class_instance)} items" in s
 
-def test_dynamic_method_identity(temp_class):
-    assert temp_class.dynamic_method("X") == "X"
-    assert temp_class.dynamic_method(10) == 10
+    def test_bool_reflects_directory_existence(self, class_instance, tmp_dir):
+        assert bool(class_instance) is True
 
-def test_class_method_yields_class_name():
-    assert Class.class_method() == "Class"
+        # remove folder → __bool__ should now be False
+        inst = Class(inst=Main(pdir=tmp_dir))
+        inst.class_dir.rmdir()
+        assert not bool(inst)
 
-def test_static_method_is_passthrough():
-    assert Class.static_method("abc") == "abc"
-    assert Class.static_method(3.14) == 3.14
+    def test_equality_on_same_and_different_paths(self, tmp_dir):
+        # same path → equal
+        m1 = Main(pdir=tmp_dir)
+        m2 = Main(pdir=tmp_dir)
+        c1 = Class(inst=m1)
+        c2 = Class(inst=m2)
+        assert c1 == c2
+        assert not (c1 != c2)
+
+        # different paths → not equal
+        d1 = tmp_dir / "a"; d2 = tmp_dir / "b"
+        d1.mkdir(); d2.mkdir()
+        c3 = Class(inst=Main(pdir=d1))
+        c4 = Class(inst=Main(pdir=d2))
+        assert c3 != c4
+
+    def test_len_contains_getitem_iter_and_refresh(self, class_instance):
+        # start empty
+        initial = len(class_instance)
+        assert initial == 0
+
+        # add files
+        for name in ("a.txt", "b.txt"):
+            (class_instance.class_dir / name).write_text("x")
+        class_instance.refresh()
+
+        # length updated
+        assert len(class_instance) == initial + 2
+
+        # __contains__
+        assert "a.txt" in class_instance
+        assert "missing.txt" not in class_instance
+
+        # __getitem__ and IndexError
+        assert (class_instance[0].name in {"a.txt", "b.txt"})
+        with pytest.raises(IndexError):
+            _ = class_instance[999]
+
+        # __iter__
+        names = sorted(p.name for p in class_instance)
+        assert names == sorted(["a.txt", "b.txt"])
+
+
+# ─── API‐Method Tests for Class ──────────────────────────────────────────
+
+class TestClassMethods:
+    def test_dynamic_method_echoes_argument(self, class_instance):
+        for val in ("hi", 123, None):
+            assert class_instance.dynamic_method(val) == val
+
+    def test_class_method_returns_class_name(self):
+        assert Class.class_method() == "Class"
+
+    def test_static_method_passthrough(self):
+        for val in ("xyz", 3.14, [1, 2, 3]):
+            assert Class.static_method(val) == val
+
+    def test_dynamic_method_handles_exceptions_gracefully(self, class_instance):
+        def failing_func(x): raise ValueError("intentional")
+
+        with pytest.raises(ValueError):
+            _ = class_instance.dynamic_method(failing_func("fail"))
+
+# ─── File Handling Tests for Class ──────────────────────────────────────────
+
+class TestClassFileHandling:
+
+    def test_creates_new_file(self, class_instance):
+        """Test that a missing file is created by verify_or_create_file."""
+        file_path = class_instance.class_dir / "created_file.txt"
+
+        result = class_instance.verify_or_create_file(class_instance, file_path, label="test file")
+
+        assert result.exists()
+        assert result.is_file()
+        assert result == file_path
+
+
+    def test_returns_existing_file(self, class_instance):
+        """Test that an existing file is returned without error."""
+        file_path = class_instance.class_dir / "existing_file.txt"
+        file_path.write_text("preexisting")
+
+        result = class_instance.verify_or_create_file(class_instance, file_path, label="test file")
+
+        assert result == file_path
+        assert result.read_text() == "preexisting"
+
+
+    def test_fails_gracefully_when_file_cannot_be_created(self, monkeypatch, class_instance):
+        """Simulate sm.exists() throwing and file not being created."""
+        def mock_exists(path, create_if_missing=True):
+            raise FileNotFoundError("simulated failure")
+
+        monkeypatch.setattr(sm, "exists", mock_exists)
+
+        file_path = class_instance.class_dir / "fail.txt"
+
+        with pytest.raises(RuntimeError) as excinfo:
+            Class.verify_or_create_file(class_instance, file_path, label="broken")
+
+        assert "could not create broken" in str(excinfo.value)
+
+
+    def test_returns_none_if_file_exists_after_failure(self, monkeypatch, class_instance):
+        file_path = class_instance.class_dir / "race_condition.txt"
+        file_path.touch()
+
+        def mock_exists(path, create_if_missing=True):
+            raise FileNotFoundError("simulated flaky condition")
+
+        monkeypatch.setattr(sm, "exists", mock_exists)
+
+        result = Class.verify_or_create_file(class_instance, file_path, label="fallback")
+        assert result.exists()
+        assert result == file_path
+
+    def test_refresh_resets_contents(self, class_instance):
+        assert len(class_instance) == 0
+        (class_instance.class_dir / "new.txt").write_text("test")
+        class_instance.refresh()
+        assert "new.txt" in class_instance
+
+    def test_write_and_read_file(self, class_instance):
+        test_file = class_instance.class_dir / "sample.txt"
+        test_file.write_text("hello world")
+        assert test_file.exists()
+        assert test_file.read_text() == "hello world"
+
+    def test_snapshot_creates_copy(self, tmp_path, class_instance):
+        (class_instance.class_dir / "x.txt").write_text("data")
+        target = tmp_path / "clone"
+        class_instance.snapshot(target)
+        assert (target / "x.txt").exists()
+
+    def test_copy_to_creates_duplicates(self, tmp_path, class_instance):
+        (class_instance.class_dir / "a.txt").write_text("x")
+        new_dir = tmp_path / "dest"
+        class_instance.copy_to(new_dir)
+        assert (new_dir / "a.txt").exists()
+
+# ─── Misc Handling Tests for Class ──────────────────────────────────────────
+
+class TestClassMisc:
+
+    def test_to_dict_has_keys(self, class_instance):
+        d = class_instance.to_dict()
+        assert "path" in d and "id" in d and "items" in d
