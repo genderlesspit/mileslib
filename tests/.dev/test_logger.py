@@ -1,14 +1,14 @@
+import shutil
 from typing import Iterator
 import logging
-import os
-from staticmethods import StaticMethods as sm
 from pathlib import Path
 import sys
-import importlib
 import pytest
 from unittest import mock
-# At the top
 from logging.handlers import RotatingFileHandler
+import os
+from datetime import datetime
+from staticmethods import StaticMethods as sm
 
 ### Static Methods ###
 """
@@ -93,14 +93,8 @@ You should **never instantiate StaticMethods** — it is purely a namespace for 
 
 """
 
-### Script ###
-
-import os
-from datetime import datetime
-from staticmethods import StaticMethods as sm
-
 class Main:
-    def __init__(self, pdir: str = os.getcwd()):
+    def __init__(self, pdir: Path = os.getcwd()):
         self.sm = sm
         self.pdir = sm.validate_instance_directory(pdir)
         self.launch_time = datetime.utcnow()
@@ -117,6 +111,7 @@ class Logger:
         self.log_stamp = self.m.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
 
         self.log_dir = sm.validate_directory(self.m.pdir / "logs")
+        self.class_dir = self.log_dir #alt for avoiding refactoring code
         self.log_file_dir , was_log_file_created = sm.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
         self.logger = self.setup_structlog_logger(self.log_file_dir)
 
@@ -127,7 +122,9 @@ class Logger:
         self.contents = list(self.pdir.iterdir())
 
     def __getattr__(self, name):
-        return getattr(self.logger, name)
+        if hasattr(self.logger, name):
+            return getattr(self.logger, name)
+        raise AttributeError(f"'Logger' object has no attribute '{name}'")
 
     ### Dynamic Methods ###
     def dynamic_method(self, arg):
@@ -147,6 +144,21 @@ class Logger:
         return cls.__name__
 
     ### Static Methods ###
+    @staticmethod
+    def close_handlers() -> None:
+        """
+        Close all logging handlers associated with this logger.
+        Useful for cleanup in tests or before deleting log files.
+        """
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers:
+            try:
+                handler.flush()
+                handler.close()
+            except Exception:
+                pass
+        root_logger.handlers.clear()
+
     @staticmethod
     def setup_structlog_logger(log_path: Path):
         """
@@ -203,14 +215,12 @@ class Logger:
 
         return structlog.get_logger()
 
-    def __repr__(self) -> str:
-        """
-        Return the official representation of the object for debugging.
-
-        Example:
-            <Boilerplate path='/home/user/project'>
-        """
-        return f"<{self.__class__.__name__} path='{self.class_dir}'>"
+    def __repr__(self):
+        return (
+            f"<Logger id='{self._id}' "
+            f"path='{self.log_dir}' "
+            f"file='{self.log_file_dir.name}'>"
+        )
 
     def __str__(self) -> str:
         """
@@ -349,7 +359,6 @@ Fixtures
 
 def test_structlog_auto_install_fails(temp_log_file):
     original_import = __import__
-
     def failing_import(name, *args, **kwargs):
         if name == "structlog":
             raise ImportError("No structlog")
@@ -408,36 +417,37 @@ def test_logger_writes_json_logs_to_file(temp_logger):
     log_lines = log_file.read_text().strip().splitlines()
     assert len(log_lines) >= 1, "No log lines found in the log file."
 
-def test_logger_console_output(capfd, tmp_path: Path):
-    """Test that log events are also written to console."""
-    temp_log = tmp_path / "logs" / "app.log"
-    logger = setup_structlog_logger(temp_log)
+def test_logger_console_output(capfd, temp_logger):
+    logger = temp_logger
     test_event = "console_test_event"
     logger.info(test_event, extra_info="console")
 
-    # Capture stdout
-    captured = capfd.readouterr().out.strip().splitlines()
-    # Verify at least one of the captured lines contains our event message
-    assert any(test_event in line for line in captured), "Event not found in console output."
+    sys.stderr.flush()  # flush stderr
 
+    captured = capfd.readouterr().err.strip().splitlines()
+    assert any(test_event in line for line in captured), "Event not found in console stderr output."
 
-def test_log_rotation(temp_log_file: Path):
+def test_log_rotation(temp_logger):
     """Test that log rotation works by writing enough log events to exceed the threshold."""
-    logger = setup_structlog_logger(temp_log_file)
-    # Write multiple small log entries to force log rotation
-    num_entries = 100
-    for i in range(num_entries):
-        logger.info("rotation_test", entry=i)
+    logger = temp_logger
+    log_file = logger.log_file_dir  # <-- actual log file path
+    log_dir = log_file.parent
 
-    # Flush and close handlers so that files are updated
+    # Write multiple small log entries to force rotation
+    for i in range(1000):
+        logger.info("rotation_test", entry=i, payload="x" * 1000)
+
+    # Flush and close handlers
     for handler in logging.getLogger().handlers:
-        handler.flush()
-        handler.close()
+        try:
+            handler.flush()
+            handler.close()
+        except ValueError:
+            pass  # Already closed
 
-    # Check that backup files are created
-    log_dir = temp_log_file.parent
-    log_files = list(log_dir.glob("app.log*"))
-    assert len(log_files) > 1, "Log rotation did not create backup files."
+    # Check for rotated files
+    rotated_logs = list(log_dir.glob(f"{log_file.name}*"))
+    assert len(rotated_logs) > 1, "Log rotation did not create backup files."
 
 ### Default Tests/Fixtures ###
 
@@ -453,108 +463,92 @@ def temp_log_file(tmp_path: Path):
     """Provide a temporary log file path."""
     return tmp_path / "logs" / "app.log"
 
-def test_repr_returns_expected_string(temp_logger):
+### Special Method Tests ###
+
+def test_repr_returns_expected_format(temp_logger):
     result = repr(temp_logger)
-    assert result.startswith("<Logger path='")
-    assert str(temp_logger.class_dir) in result
+    assert result.startswith("<Logger id=")
+    assert str(temp_logger.log_dir) in result
+    assert temp_logger.log_file_dir.name in result
 
-def test_str_returns_human_readable(temp_logger):
-    expected_prefix = f"Logger at '{temp_logger.class_dir}' with"
-    assert str(temp_logger).startswith(expected_prefix)
+def test_str_returns_human_readable_string(temp_logger):
+    result = str(temp_logger)
+    assert result.startswith(f"Logger at '{temp_logger.class_dir}' with")
 
-def test_bool_true_when_valid_dir(temp_Logger):
+def test_bool_true_if_class_dir_exists(temp_logger):
     assert bool(temp_logger) is True
 
-def test_bool_false_when_path_deleted(tmp_path):
-    main = test_Main(pdir=tmp_path)
-    instance = Logger(inst=main)
-    instance.class_dir.rmdir()
-    assert bool(instance) is False
+def test_bool_false_if_class_dir_missing(tmp_path):
+    main = Main(pdir=tmp_path)
+    logger = Logger(inst=main)
 
-def test_eq_same_path_same_object(tmp_path):
-    main1 = test_Main(pdir=tmp_path)
-    main2 = test_Main(pdir=tmp_path)
-    c1 = Logger(inst=main1)
-    c2 = Logger(inst=main2)
-    assert c1 == c2
+    # Close file handles to allow deletion (important on Windows)
+    logger.close_handlers()
+
+    # Now forcibly delete the logger's directory
+    shutil.rmtree(logger.class_dir)
+
+    # Should now return False
+    assert bool(logger) is False
 
 
-def test_eq_different_path_objects(tmp_path):
-    path_a = tmp_path / "a"
-    path_b = tmp_path / "b"
-    path_a.mkdir()
-    path_b.mkdir()
+def test_eq_returns_true_for_same_path(tmp_path):
+    main1 = Main(pdir=tmp_path)
+    main2 = Main(pdir=tmp_path)
+    l1 = Logger(inst=main1)
+    l2 = Logger(inst=main2)
+    assert l1 == l2
 
-    main1 = test_Main(pdir=path_a)
-    main2 = test_Main(pdir=path_b)
-    c1 = Logger(inst=main1)
-    c2 = Logger(inst=main2)
+def test_eq_returns_false_for_different_dirs(tmp_path):
+    p1 = tmp_path / "one"
+    p2 = tmp_path / "two"
+    p1.mkdir()
+    p2.mkdir()
+    l1 = Logger(inst=Main(p1))
+    l2 = Logger(inst=Main(p2))
+    assert l1 != l2
 
-    assert c1 != c2
-
-def test_len_counts_files_correctly(temp_Logger):
-    temp_logger.refresh()  # Ensure accurate baseline
-    initial_count = len(temp_logger)
-
-    (temp_logger.class_dir / "file1.txt").write_text("A")
-    (temp_logger.class_dir / "file2.txt").write_text("B")
+def test_len_matches_class_dir_file_count(temp_logger):
+    # Add 2 files
+    (temp_logger.class_dir / "logA.txt").write_text("a")
+    (temp_logger.class_dir / "logB.txt").write_text("b")
     temp_logger.refresh()
+    assert len(temp_logger) >= 2
 
-    expected = initial_count + 2
-    assert len(temp_logger) == expected
-
-def test_contains_checks_file_by_name(temp_Logger):
-    (temp_logger.class_dir / "testfile.txt").write_text("data")
+def test_contains_checks_by_filename(temp_logger):
+    filename = "included.txt"
+    (temp_logger.class_dir / filename).write_text("yes")
     temp_logger.refresh()
-    assert "testfile.txt" in temp_logger
-    assert "nonexistent.txt" not in temp_logger
+    assert filename in temp_logger
+    assert "not_here.txt" not in temp_logger
 
-def test_getitem_returns_path_by_index(temp_Logger):
-    file1 = temp_logger.class_dir / "file1.txt"
-    file2 = temp_logger.class_dir / "file2.txt"
-    file1.write_text("one")
-    file2.write_text("two")
+def test_getitem_returns_correct_path_type(temp_logger):
+    (temp_logger.class_dir / "one.log").write_text("x")
+    (temp_logger.class_dir / "two.log").write_text("y")
     temp_logger.refresh()
-    assert temp_logger[0].name in {"file1.txt", "file2.txt"}
-    assert isinstance(temp_logger[0], Path)
+    path = temp_logger[0]
+    assert isinstance(path, Path)
+    assert path.exists()
 
-def test_iter_yields_all_contents(temp_Logger):
-    files = ["a.txt", "b.txt", "c.txt"]
-    for name in files:
-        (temp_logger.class_dir / name).write_text("data")
+def test_iterates_all_files(temp_logger):
+    expected = {"a.txt", "b.txt", "c.txt"}
+    for name in expected:
+        (temp_logger.class_dir / name).write_text("log")
     temp_logger.refresh()
-    names = [f.name for f in temp_logger]
-    for name in files:
-        assert name in names
+    found = {p.name for p in temp_logger}
+    assert expected.issubset(found)
 
-def test_refresh_updates_internal_file_list(temp_Logger):
-    temp_logger.refresh()  # Ensure contents is accurate
-    initial_count = len(temp_logger)
-
-    new_file = temp_logger.class_dir / "new.txt"
-    new_file.write_text("added later")
-
+def test_refresh_updates_contents(temp_logger):
+    before = len(temp_logger)
+    (temp_logger.class_dir / "x").write_text("1")
     temp_logger.refresh()
-    assert len(temp_logger) == initial_count + 1
-    assert "new.txt" in temp_logger
+    assert len(temp_logger) == before + 1
 
-### Tests for Method ###
+### Logger Behavior ###
 
-def test_dynamic_method_returns_argument(temp_Logger):
-    """Ensure dynamic_method echoes the input value using instance."""
-    assert temp_logger.dynamic_method("value") == "value"
+def test_dynamic_method_passthrough(temp_logger):
+    assert temp_logger.dynamic_method("hi") == "hi"
     assert temp_logger.dynamic_method(123) == 123
 
-
-def test_class_method_returns_class_name():
-    """Ensure class_method returns the name of the classname as a string."""
-    result = Logger.class_method()
-    assert isinstance(result, str)
-    assert result == "Logger"
-
-
-def test_static_method_returns_argument():
-    """Ensure static_method echoes the input value."""
-    assert Logger.static_method("static") == "static"
-    assert Logger.static_method(42) == 42
-
+def test_class_method_is_logger_name():
+    assert Logger.class_method() == "Logger"

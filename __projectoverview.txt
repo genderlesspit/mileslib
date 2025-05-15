@@ -141,46 +141,41 @@ Deliverables:
 
 
 SPRINT 1
+Legend (Y) is completed, W is working, X is Not Done, ? is confused...', N is rejected/refactored
+
 Day 1 (Monday): Project Initialization + Logging
 Objective: Create the MilesLib repo and a working logging system.
-•	Create Git repo: mileslib/
-•	Set up folder structure:
-CopyEdit
-mileslib/
-  ├── __init__.py
-  ├── log.py
-  ├── config.py
-  ├── cli/
-  └── tests/
-•	Write log.py:
-o	init_logger(log_path)
-o	log.info, log.warning, log.error
-•	Add log.txt test log file in logs/ folder
-•	Manual test: Log to file, validate timestamps and log levels
+Y	Create Git repo: mileslib/
+Y	Set up folder structure:
+W	Write log.py:
+W	init_logger(log_path)
+W	log.info, log.warning, log.error
+X	Add log.txt test log file in logs/ folder
+X	Manual test: Log to file, validate timestamps and log levels
 ________________________________________
 Day 2 (Tuesday): Config System + Path Utilities
 Objective: Implement config loader and file/directory existence utilities.
-•	Create config.json default file with a few test keys
-•	Write mileslib/config.py:
-o	load_config(path)
-o	validate_config(schema)
-•	Write exists.py:
-o	path_exists(path: Path, create_if_missing=False)
-o	Return consistent Path object
-•	Add logging to config + path check routines
-•	Unit tests: config load success/fail, missing paths
+Y	Create config.json default file with a few test keys
+Y	Write mileslib/config.py:
+Y	load_config(path)
+N	validate_config(schema)
+Y	Write exists.py:
+Y	path_exists(path: Path, create_if_missing=False)
+Y	Return consistent Path object
+?	Add logging to config + path check routines
+Y	Unit tests: config load success/fail, missing paths
 ________________________________________
 Day 3 (Wednesday): Request Wrapper + Timer Utility
 Objective: Build fault-tolerant request and performance timer utilities.
-•	Write request.py:
-o	http_get(url, retries=3)
-o	http_post(url, data, retries=3)
-o	Use requests with backoff + log failures
-•	Write timer.py:
-o	@timer(label="operation") decorator to log duration
-•	Add tests:
-o	Retry behavior
-o	Timer output logs
+X	Write request.py:
+X	http_get(url, retries=3)
+X	http_post(url, data, retries=3)
+X	Use requests with backoff + log failures
+X	Write timer.py:
+X	@timer(label="operation") decorator to log duration
+X	Add tests:
+X	Retry behavior
+X	Timer output logs
 ________________________________________
 Day 4 (Thursday): CLI Entrypoint + Pytest Scaffolding
 Objective: Add command-line interface and unit test harness.

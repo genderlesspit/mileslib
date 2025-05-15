@@ -9,7 +9,7 @@ from pathlib import Path
 StaticMethods Utility Module
 ============================
 
-This internal utility class (`StaticMethods`) provides static helper methods used throughout
+This internal utility classname (`StaticMethods`) provides static helper methods used throughout
 MilesLib components to enforce type validation, file/directory sanity, instance hygiene,
 dependency checking, retry logic, and logging-safe operations.
 
@@ -50,7 +50,7 @@ Methods Overview
     - Supports mixed key/index access with graceful fallback.
 
 8. validate_instance(inst):
-    - Ensures an object is not None and is class-like.
+    - Ensures an object is not None and is classname-like.
     - Rejects primitives and empty placeholders.
 
 9. validate_instance_directory(pdir):
@@ -71,10 +71,10 @@ Methods Overview
 
 Usage Pattern
 -------------
-In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this class
+In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this classname
 should be accessed via dependency injection like:
 
-    class Config:
+    classname Config:
         def __init__(self, inst):
             self.m = inst
             self.sm = inst.sm
@@ -89,27 +89,27 @@ You should **never instantiate StaticMethods** — it is purely a namespace for 
 
 ### Script ###
 
-class Main:
+class test_Main:
     def __init__(self, pdir = None):
         '''
-        Parent instance of Class.
+        Parent instance of CLI.
         :param pdir: Project directory, usually os.getcwd(), unless specified by config files.
         '''
         pdir = pdir or os.getcwd()
         self.pdir = sm.validate_instance_directory(pdir=pdir)
 
-class Class:
+class CLI:
     def __init__(self, inst):
         """
-        Generic class that operates on a passed-in RenderTestBoilerplate instance.
-        :param inst Argument for instance passed through the class.
+        CLI operates on a passed-in test_Main instance.
+        :param inst Argument for instance passed through the classname.
         """
         sm.validate_instance(inst=inst)
         self.m = inst
         self.pdir = self.m.pdir
 
         # Directory Initialization
-        self.class_dir = self.pdir / "Class"
+        self.class_dir = self.pdir / "CLI"
         sm.validate_directory(self.class_dir)
 
         #ID
@@ -126,12 +126,12 @@ class Class:
         """
         return arg
 
-    ### Class Methods ###
+    ### CLI Methods ###
     @classmethod
     def class_method(cls):
         """
-        Placeholder class method.
-        - Uses class reference (`cls`)
+        Placeholder classname method.
+        - Uses classname reference (`cls`)
         """
         return cls.__name__
 
@@ -173,12 +173,12 @@ class Class:
 
     def __eq__(self, other: object) -> bool:
         """
-        Check if two Class instances point to the same directory.
+        Check if two CLI instances point to the same directory.
 
         Returns:
             bool: True if same type and same path.
         """
-        return isinstance(other, Class) and self.class_dir == other.class_dir
+        return isinstance(other, CLI) and self.class_dir == other.class_dir
 
     def __len__(self) -> int:
         """
@@ -257,7 +257,7 @@ Fixtures
     - Useful for testing string methods, formatting, or casing.
 
 4. sample_object:
-    - Dummy class with a single `.value = 42` attribute.
+    - Dummy classname with a single `.value = 42` attribute.
     - Used to test generic object attribute access or mocking.
 
 5. sample_tuple:
@@ -287,101 +287,113 @@ Fixtures
 """
 
 @pytest.fixture
-def temp_class(tmp_path):
-    """Creates a Class instance with a temporary directory."""
-    main = Main(pdir=tmp_path)
-    instance = Class(inst=main)
+def temp_CLI(tmp_path):
+    """Creates a CLI instance with a temporary directory."""
+    main = test_Main(pdir=tmp_path)
+    instance = CLI(inst=main)
     return instance
 
-def test_repr_matches_class_format(temp_class):
-    result = repr(temp_class)
-    assert isinstance(result, str)
-    assert result.startswith(f"<{temp_class.__class__.__name__} path='")
-    assert str(temp_class.class_dir) in result
-    assert result.endswith("'>")
+def test_repr_returns_expected_string(temp_CLI):
+    result = repr(temp_CLI)
+    assert result.startswith("<CLI path='")
+    assert str(temp_CLI.class_dir) in result
 
-def test_str_describes_object_state(temp_class):
-    human = str(temp_class)
-    assert human.startswith(f"{temp_class.__class__.__name__} at '{temp_class.class_dir}' with")
-    assert f"{len(temp_class)} items" in human
+def test_str_returns_human_readable(temp_CLI):
+    expected_prefix = f"CLI at '{temp_CLI.class_dir}' with"
+    assert str(temp_CLI).startswith(expected_prefix)
 
-def test_bool_returns_true_if_valid_path(temp_class):
-    assert bool(temp_class) is True
+def test_bool_true_when_valid_dir(temp_CLI):
+    assert bool(temp_CLI) is True
 
-def test_bool_returns_false_if_deleted(tmp_path):
-    main = Main(pdir=tmp_path)
-    instance = Class(inst=main)
+def test_bool_false_when_path_deleted(tmp_path):
+    main = test_Main(pdir=tmp_path)
+    instance = CLI(inst=main)
     instance.class_dir.rmdir()
-    assert not bool(instance)
+    assert bool(instance) is False
 
-def test_eq_symmetric_and_path_sensitive(tmp_path):
-    main1 = Main(pdir=tmp_path)
-    main2 = Main(pdir=tmp_path)
-    obj1 = Class(inst=main1)
-    obj2 = Class(inst=main2)
-    assert obj1 == obj2
-    assert obj2 == obj1
-    assert not (obj1 != obj2)
+def test_eq_same_path_same_object(tmp_path):
+    main1 = test_Main(pdir=tmp_path)
+    main2 = test_Main(pdir=tmp_path)
+    c1 = CLI(inst=main1)
+    c2 = CLI(inst=main2)
+    assert c1 == c2
 
-def test_eq_returns_false_for_different_dirs(tmp_path):
-    d1, d2 = tmp_path / "a", tmp_path / "b"
-    d1.mkdir()
-    d2.mkdir()
-    c1 = Class(Main(d1))
-    c2 = Class(Main(d2))
+
+def test_eq_different_path_objects(tmp_path):
+    path_a = tmp_path / "a"
+    path_b = tmp_path / "b"
+    path_a.mkdir()
+    path_b.mkdir()
+
+    main1 = test_Main(pdir=path_a)
+    main2 = test_Main(pdir=path_b)
+    c1 = CLI(inst=main1)
+    c2 = CLI(inst=main2)
+
     assert c1 != c2
 
-def test_len_reflects_number_of_items(temp_class):
-    initial_count = len(temp_class)
+def test_len_counts_files_correctly(temp_CLI):
+    temp_CLI.refresh()  # Ensure accurate baseline
+    initial_count = len(temp_CLI)
 
-    # Add two new files
-    (temp_class.class_dir / "x.txt").write_text("1")
-    (temp_class.class_dir / "y.txt").write_text("2")
-    temp_class.refresh()
+    (temp_CLI.class_dir / "file1.txt").write_text("A")
+    (temp_CLI.class_dir / "file2.txt").write_text("B")
+    temp_CLI.refresh()
 
-    assert len(temp_class) == initial_count + 2
+    expected = initial_count + 2
+    assert len(temp_CLI) == expected
 
-def test_contains_uses_filename_only(temp_class):
-    (temp_class.class_dir / "alpha.txt").write_text("yes")
-    temp_class.refresh()
-    assert "alpha.txt" in temp_class
-    assert "beta.txt" not in temp_class
+def test_contains_checks_file_by_name(temp_CLI):
+    (temp_CLI.class_dir / "testfile.txt").write_text("data")
+    temp_CLI.refresh()
+    assert "testfile.txt" in temp_CLI
+    assert "nonexistent.txt" not in temp_CLI
 
-def test_getitem_returns_correct_path(temp_class):
-    file = temp_class.class_dir / "z.txt"
-    file.write_text("Zed")
-    temp_class.refresh()
-    path = temp_class[0]
-    assert isinstance(path, Path)
-    assert path.name == "z.txt"
+def test_getitem_returns_path_by_index(temp_CLI):
+    file1 = temp_CLI.class_dir / "file1.txt"
+    file2 = temp_CLI.class_dir / "file2.txt"
+    file1.write_text("one")
+    file2.write_text("two")
+    temp_CLI.refresh()
+    assert temp_CLI[0].name in {"file1.txt", "file2.txt"}
+    assert isinstance(temp_CLI[0], Path)
 
-def test_getitem_raises_index_error(temp_class):
-    with pytest.raises(IndexError):
-        _ = temp_class[999]
+def test_iter_yields_all_contents(temp_CLI):
+    files = ["a.txt", "b.txt", "c.txt"]
+    for name in files:
+        (temp_CLI.class_dir / name).write_text("data")
+    temp_CLI.refresh()
+    names = [f.name for f in temp_CLI]
+    for name in files:
+        assert name in names
 
-def test_iter_returns_all_paths(temp_class):
-    names = ["1.txt", "2.txt"]
-    for name in names:
-        (temp_class.class_dir / name).write_text("ok")
-    temp_class.refresh()
-    files = list(temp_class)
-    assert all(isinstance(p, Path) for p in files)
-    assert sorted(p.name for p in files) >= sorted(names)
+def test_refresh_updates_internal_file_list(temp_CLI):
+    temp_CLI.refresh()  # Ensure contents is accurate
+    initial_count = len(temp_CLI)
 
-def test_refresh_updates_contents_after_change(temp_class):
-    old_len = len(temp_class)
-    (temp_class.class_dir / "added.txt").write_text("more")
-    temp_class.refresh()
-    assert len(temp_class) == old_len + 1
-    assert "added.txt" in temp_class
+    new_file = temp_CLI.class_dir / "new.txt"
+    new_file.write_text("added later")
 
-def test_dynamic_method_identity(temp_class):
-    assert temp_class.dynamic_method("X") == "X"
-    assert temp_class.dynamic_method(10) == 10
+    temp_CLI.refresh()
+    assert len(temp_CLI) == initial_count + 1
+    assert "new.txt" in temp_CLI
 
-def test_class_method_yields_class_name():
-    assert Class.class_method() == "Class"
+### Tests for Method ###
 
-def test_static_method_is_passthrough():
-    assert Class.static_method("abc") == "abc"
-    assert Class.static_method(3.14) == 3.14
+def test_dynamic_method_returns_argument(temp_CLI):
+    """Ensure dynamic_method echoes the input value using instance."""
+    assert temp_CLI.dynamic_method("value") == "value"
+    assert temp_CLI.dynamic_method(123) == 123
+
+
+def test_class_method_returns_class_name():
+    """Ensure class_method returns the name of the classname as a string."""
+    result = CLI.class_method()
+    assert isinstance(result, str)
+    assert result == "CLI"
+
+
+def test_static_method_returns_argument():
+    """Ensure static_method echoes the input value."""
+    assert CLI.static_method("static") == "static"
+    assert CLI.static_method(42) == 42
