@@ -1,8 +1,14 @@
 from typing import Iterator
-import pytest
+import logging
 import os
-from util.staticmethods import StaticMethods as sm
+from staticmethods import StaticMethods as sm
 from pathlib import Path
+import sys
+import importlib
+import pytest
+from unittest import mock
+# At the top
+from logging.handlers import RotatingFileHandler
 
 ### Static Methods ###
 """
@@ -89,34 +95,39 @@ You should **never instantiate StaticMethods** — it is purely a namespace for 
 
 ### Script ###
 
+import os
+from datetime import datetime
+from staticmethods import StaticMethods as sm
+
 class Main:
-    def __init__(self, pdir = None):
-        '''
-        Parent instance of Logger.
-        :param pdir: Project directory, usually os.getcwd(), unless specified by config files.
-        '''
-        pdir = pdir or os.getcwd()
-        self.pdir = sm.validate_instance_directory(pdir=pdir)
+    def __init__(self, pdir: str = os.getcwd()):
+        self.sm = sm
+        self.pdir = sm.validate_instance_directory(pdir)
+        self.launch_time = datetime.utcnow()
 
 class Logger:
     def __init__(self, inst):
         """
-        Logger operates on a passed-in RenderTestBoilerplate instance.
+        Logger operates on a passed-in test_Main instance.
         :param inst Argument for instance passed through the classname.
         """
         sm.validate_instance(inst=inst)
         self.m = inst
         self.pdir = self.m.pdir
+        self.log_stamp = self.m.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
 
-        # Directory Initialization
-        self.class_dir = self.pdir / "Logger"
-        sm.validate_directory(self.class_dir)
+        self.log_dir = sm.validate_directory(self.m.pdir / "logs")
+        self.log_file_dir , was_log_file_created = sm.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
+        self.logger = self.setup_structlog_logger(self.log_file_dir)
 
         #ID
         self._id = self.pdir.name
 
         #Contents
         self.contents = list(self.pdir.iterdir())
+
+    def __getattr__(self, name):
+        return getattr(self.logger, name)
 
     ### Dynamic Methods ###
     def dynamic_method(self, arg):
@@ -137,12 +148,60 @@ class Logger:
 
     ### Static Methods ###
     @staticmethod
-    def static_method(arg):
+    def setup_structlog_logger(log_path: Path):
         """
-        Placeholder static method.
-        - Stateless; does not use `self` or `cls`
+        Configure a structlog-based logger with file rotation and JSON output.
+
+        Attempts to import structlog, installing it if necessary. Uses StaticMethods.recall
+        to retry import after installation. Sets up both console and file handlers.
+
+        Args:
+            log_path (Path): The target path for log file output.
+
+        Returns:
+            BoundLogger: A configured structlog logger instance.
         """
-        return arg
+
+        def import_structlog():
+            return __import__("structlog")
+
+        # Try importing structlog, install if missing, retry using recall
+        try:
+            structlog = import_structlog()
+        except ImportError:
+            sm.dependency("structlog")
+            try:
+                structlog = sm.recall(import_structlog, max_attempts=3, handled_exceptions=(ImportError,))
+            except ImportError as e:
+                raise RuntimeError("structlog could not be properly loaded after installation.") from e
+
+        # Prepare log directory
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Set up file and console handlers
+        handlers = [
+            RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=5),
+            logging.StreamHandler()
+        ]
+
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        root_logger.handlers.clear()  # critical!
+        for h in handlers:
+            root_logger.addHandler(h)
+
+        # Configure structlog
+        structlog.configure(
+            processors=[
+                structlog.processors.TimeStamper(fmt="iso"),
+                structlog.processors.JSONRenderer(),
+            ],
+            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+            logger_factory=structlog.stdlib.LoggerFactory(),
+            cache_logger_on_first_use=True,
+        )
+
+        return structlog.get_logger()
 
     def __repr__(self) -> str:
         """
@@ -286,34 +345,135 @@ Fixtures
     - Tests dict key validation or serialization constraints.
 """
 
+### Custom Tests ###
+
+def test_structlog_auto_install_fails(temp_log_file):
+    original_import = __import__
+
+    def failing_import(name, *args, **kwargs):
+        if name == "structlog":
+            raise ImportError("No structlog")
+        return original_import(name, *args, **kwargs)
+
+    with mock.patch("builtins.__import__", side_effect=failing_import):
+        with mock.patch("test_logger.sm.dependency") as mock_dep:
+            with pytest.raises(RuntimeError, match="structlog could not be properly loaded"):
+                from test_logger import Logger
+                Logger.setup_structlog_logger(temp_log_file)
+
+            mock_dep.assert_called_once_with("structlog")
+
+def test_structlog_auto_install_succeeds(temp_log_file):
+    sys.modules.pop("test_logger", None)
+
+    # SAVE the true built-in __import__ BEFORE mocking begins
+    real_import = __import__
+
+    with mock.patch.dict("sys.modules", {"structlog": None}):
+        with mock.patch("builtins.__import__") as mock_import:
+            def fake_import(name, *args, **kwargs):
+                if name == "structlog":
+                    mock_structlog = mock.MagicMock()
+
+                    # required structlog methods & fields
+                    mock_structlog.get_logger.return_value = mock.MagicMock()
+                    mock_structlog.configure.return_value = None
+                    mock_structlog.stdlib = mock.MagicMock()
+                    mock_structlog.stdlib.LoggerFactory.return_value = mock.MagicMock()
+                    mock_structlog.make_filtering_bound_logger.return_value = mock.MagicMock()
+
+                    # processors
+                    mock_structlog.processors = mock.MagicMock()
+                    mock_structlog.processors.TimeStamper.return_value = lambda logger, method, event_dict: event_dict
+                    mock_structlog.processors.JSONRenderer.return_value = lambda logger, method, event_dict: event_dict
+
+                    mock_import.side_effect = None  # remove side effect after simulating success
+                    return mock_structlog
+
+                return real_import(name, *args, **kwargs)
+
+def test_logger_writes_json_logs_to_file(temp_logger):
+    logger = temp_logger
+    test_event = "test_event"
+    logger.info(test_event, user="tester", value=123)
+
+    # Use the logger's known file
+    log_file = logger.log_file_dir
+
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+        handler.close()
+
+    assert log_file.exists(), "Log file was not created."
+    log_lines = log_file.read_text().strip().splitlines()
+    assert len(log_lines) >= 1, "No log lines found in the log file."
+
+def test_logger_console_output(capfd, tmp_path: Path):
+    """Test that log events are also written to console."""
+    temp_log = tmp_path / "logs" / "app.log"
+    logger = setup_structlog_logger(temp_log)
+    test_event = "console_test_event"
+    logger.info(test_event, extra_info="console")
+
+    # Capture stdout
+    captured = capfd.readouterr().out.strip().splitlines()
+    # Verify at least one of the captured lines contains our event message
+    assert any(test_event in line for line in captured), "Event not found in console output."
+
+
+def test_log_rotation(temp_log_file: Path):
+    """Test that log rotation works by writing enough log events to exceed the threshold."""
+    logger = setup_structlog_logger(temp_log_file)
+    # Write multiple small log entries to force log rotation
+    num_entries = 100
+    for i in range(num_entries):
+        logger.info("rotation_test", entry=i)
+
+    # Flush and close handlers so that files are updated
+    for handler in logging.getLogger().handlers:
+        handler.flush()
+        handler.close()
+
+    # Check that backup files are created
+    log_dir = temp_log_file.parent
+    log_files = list(log_dir.glob("app.log*"))
+    assert len(log_files) > 1, "Log rotation did not create backup files."
+
+### Default Tests/Fixtures ###
+
 @pytest.fixture
-def temp_Logger(tmp_path):
+def temp_logger(tmp_path):
     """Creates a Logger instance with a temporary directory."""
     main = Main(pdir=tmp_path)
     instance = Logger(inst=main)
     return instance
 
-def test_repr_returns_expected_string(temp_Logger):
-    result = repr(temp_Logger)
-    assert result.startswith("<Logger path='")
-    assert str(temp_Logger.class_dir) in result
+@pytest.fixture
+def temp_log_file(tmp_path: Path):
+    """Provide a temporary log file path."""
+    return tmp_path / "logs" / "app.log"
 
-def test_str_returns_human_readable(temp_Logger):
-    expected_prefix = f"Logger at '{temp_Logger.class_dir}' with"
-    assert str(temp_Logger).startswith(expected_prefix)
+def test_repr_returns_expected_string(temp_logger):
+    result = repr(temp_logger)
+    assert result.startswith("<Logger path='")
+    assert str(temp_logger.class_dir) in result
+
+def test_str_returns_human_readable(temp_logger):
+    expected_prefix = f"Logger at '{temp_logger.class_dir}' with"
+    assert str(temp_logger).startswith(expected_prefix)
 
 def test_bool_true_when_valid_dir(temp_Logger):
-    assert bool(temp_Logger) is True
+    assert bool(temp_logger) is True
 
 def test_bool_false_when_path_deleted(tmp_path):
-    main = Main(pdir=tmp_path)
+    main = test_Main(pdir=tmp_path)
     instance = Logger(inst=main)
     instance.class_dir.rmdir()
     assert bool(instance) is False
 
 def test_eq_same_path_same_object(tmp_path):
-    main1 = Main(pdir=tmp_path)
-    main2 = Main(pdir=tmp_path)
+    main1 = test_Main(pdir=tmp_path)
+    main2 = test_Main(pdir=tmp_path)
     c1 = Logger(inst=main1)
     c2 = Logger(inst=main2)
     assert c1 == c2
@@ -325,65 +485,65 @@ def test_eq_different_path_objects(tmp_path):
     path_a.mkdir()
     path_b.mkdir()
 
-    main1 = Main(pdir=path_a)
-    main2 = Main(pdir=path_b)
+    main1 = test_Main(pdir=path_a)
+    main2 = test_Main(pdir=path_b)
     c1 = Logger(inst=main1)
     c2 = Logger(inst=main2)
 
     assert c1 != c2
 
 def test_len_counts_files_correctly(temp_Logger):
-    temp_Logger.refresh()  # Ensure accurate baseline
-    initial_count = len(temp_Logger)
+    temp_logger.refresh()  # Ensure accurate baseline
+    initial_count = len(temp_logger)
 
-    (temp_Logger.class_dir / "file1.txt").write_text("A")
-    (temp_Logger.class_dir / "file2.txt").write_text("B")
-    temp_Logger.refresh()
+    (temp_logger.class_dir / "file1.txt").write_text("A")
+    (temp_logger.class_dir / "file2.txt").write_text("B")
+    temp_logger.refresh()
 
     expected = initial_count + 2
-    assert len(temp_Logger) == expected
+    assert len(temp_logger) == expected
 
 def test_contains_checks_file_by_name(temp_Logger):
-    (temp_Logger.class_dir / "testfile.txt").write_text("data")
-    temp_Logger.refresh()
-    assert "testfile.txt" in temp_Logger
-    assert "nonexistent.txt" not in temp_Logger
+    (temp_logger.class_dir / "testfile.txt").write_text("data")
+    temp_logger.refresh()
+    assert "testfile.txt" in temp_logger
+    assert "nonexistent.txt" not in temp_logger
 
 def test_getitem_returns_path_by_index(temp_Logger):
-    file1 = temp_Logger.class_dir / "file1.txt"
-    file2 = temp_Logger.class_dir / "file2.txt"
+    file1 = temp_logger.class_dir / "file1.txt"
+    file2 = temp_logger.class_dir / "file2.txt"
     file1.write_text("one")
     file2.write_text("two")
-    temp_Logger.refresh()
-    assert temp_Logger[0].name in {"file1.txt", "file2.txt"}
-    assert isinstance(temp_Logger[0], Path)
+    temp_logger.refresh()
+    assert temp_logger[0].name in {"file1.txt", "file2.txt"}
+    assert isinstance(temp_logger[0], Path)
 
 def test_iter_yields_all_contents(temp_Logger):
     files = ["a.txt", "b.txt", "c.txt"]
     for name in files:
-        (temp_Logger.class_dir / name).write_text("data")
-    temp_Logger.refresh()
-    names = [f.name for f in temp_Logger]
+        (temp_logger.class_dir / name).write_text("data")
+    temp_logger.refresh()
+    names = [f.name for f in temp_logger]
     for name in files:
         assert name in names
 
 def test_refresh_updates_internal_file_list(temp_Logger):
-    temp_Logger.refresh()  # Ensure contents is accurate
-    initial_count = len(temp_Logger)
+    temp_logger.refresh()  # Ensure contents is accurate
+    initial_count = len(temp_logger)
 
-    new_file = temp_Logger.class_dir / "new.txt"
+    new_file = temp_logger.class_dir / "new.txt"
     new_file.write_text("added later")
 
-    temp_Logger.refresh()
-    assert len(temp_Logger) == initial_count + 1
-    assert "new.txt" in temp_Logger
+    temp_logger.refresh()
+    assert len(temp_logger) == initial_count + 1
+    assert "new.txt" in temp_logger
 
 ### Tests for Method ###
 
 def test_dynamic_method_returns_argument(temp_Logger):
     """Ensure dynamic_method echoes the input value using instance."""
-    assert temp_Logger.dynamic_method("value") == "value"
-    assert temp_Logger.dynamic_method(123) == 123
+    assert temp_logger.dynamic_method("value") == "value"
+    assert temp_logger.dynamic_method(123) == 123
 
 
 def test_class_method_returns_class_name():
@@ -397,3 +557,4 @@ def test_static_method_returns_argument():
     """Ensure static_method echoes the input value."""
     assert Logger.static_method("static") == "static"
     assert Logger.static_method(42) == 42
+

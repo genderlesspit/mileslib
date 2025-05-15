@@ -7,7 +7,7 @@ from jinja2 import Template
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from util.staticmethods import StaticMethods as sm
+from staticmethods import StaticMethods as sm
 
 class RenderTestBoilerPlate:
     """
@@ -30,7 +30,7 @@ class RenderTestBoilerPlate:
 
         # Input template and output destination (hardcoded to project-relative paths)
         self.template_path = sm.validate_file(self.pdir / "tests" / "_test_boilerplate.j2")
-        self.output_path = self.pdir / "tests" / ".dev" / f"{self.args.classname.lower()}.py"
+        self.output_path = self.pdir / "tests" / ".dev" / f"test_{self.args.classname.lower()}.py"
 
         # Ensure output directory exists
         sm.validate_directory(self.output_path.parent)
@@ -71,11 +71,11 @@ Output:
 
         rendered = template.render(
             classname=self.args.classname,
-            mainname=f"test_{self.args.mainname}"
+            mainname=self.args.mainname
         )
 
         self.output_path.write_text(rendered, encoding="utf-8")
         print(f"✅ Created: {self.output_path}")
 
 if __name__ == "__main__":
-    Main(pdir=Path(os.getcwd()))
+    RenderTestBoilerPlate(pdir=Path(os.getcwd()))

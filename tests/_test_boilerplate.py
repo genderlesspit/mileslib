@@ -1,7 +1,7 @@
 from typing import Iterator
 import pytest
 import os
-from util.staticmethods import StaticMethods as sm
+from staticmethods import StaticMethods as sm
 from pathlib import Path
 
 ### Static Methods ###

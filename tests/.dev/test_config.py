@@ -2,7 +2,7 @@ import pytest
 import json
 import os
 from pathlib import Path
-from util.staticmethods import StaticMethods as sm
+from staticmethods import StaticMethods as sm
 
 class Main:
     def __init__(self, pdir = None):
