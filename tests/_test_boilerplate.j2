@@ -1,3 +1,6 @@
+{# _test_boilerplate.j2 #}
+
+import shutil
 from typing import Iterator
 import pytest
 import os
@@ -9,7 +12,7 @@ from pathlib import Path
 StaticMethods Utility Module
 ============================
 
-This internal utility classname (`StaticMethods`) provides static helper methods used throughout
+This internal utility class (`StaticMethods`) provides static helper methods used throughout
 MilesLib components to enforce type validation, file/directory sanity, instance hygiene,
 dependency checking, retry logic, and logging-safe operations.
 
@@ -50,7 +53,7 @@ Methods Overview
     - Supports mixed key/index access with graceful fallback.
 
 8. validate_instance(inst):
-    - Ensures an object is not None and is classname-like.
+    - Ensures an object is not None and is class-like.
     - Rejects primitives and empty placeholders.
 
 9. validate_instance_directory(pdir):
@@ -71,10 +74,10 @@ Methods Overview
 
 Usage Pattern
 -------------
-In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this classname
+In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this class
 should be accessed via dependency injection like:
 
-    classname Config:
+    class Config:
         def __init__(self, inst):
             self.m = inst
             self.sm = inst.sm
@@ -89,34 +92,34 @@ You should **never instantiate StaticMethods** — it is purely a namespace for 
 
 ### Script ###
 
-class {{ mainname }}:
+class {{ mainname|title }}:
     def __init__(self, pdir = None):
         '''
-        Parent instance of {{ classname }}.
+        Parent instance of {{ classname|title }}.
         :param pdir: Project directory, usually os.getcwd(), unless specified by config files.
         '''
         pdir = pdir or os.getcwd()
         self.pdir = sm.validate_instance_directory(pdir=pdir)
 
-class {{ classname }}:
+class {{ classname|title }}:
     def __init__(self, inst):
         """
-        {{ classname }} operates on a passed-in {{ mainname }} instance.
-        :param inst Argument for instance passed through the classname.
+        Generic class that operates on a passed-in RenderTestBoilerplate instance.
+        :param inst Argument for instance passed through the class.
         """
         sm.validate_instance(inst=inst)
         self.m = inst
         self.pdir = self.m.pdir
 
         # Directory Initialization
-        self.class_dir = self.pdir / "{{ classname }}"
-        sm.validate_directory(self.class_dir)
+        self.{{ classname|lower }}_dir = self.pdir / "{{ classname|title }}"
+        sm.validate_directory(self.{{ classname|lower }}_dir)
 
         #ID
         self._id = self.pdir.name
 
         #Contents
-        self.contents = list(self.pdir.iterdir())
+        self.contents = list(self.{{ classname|lower }}_dir.iterdir())  # ← FIXED LINE
 
     ### Dynamic Methods ###
     def dynamic_method(self, arg):
@@ -126,16 +129,61 @@ class {{ classname }}:
         """
         return arg
 
-    ### {{ classname }} Methods ###
+    def refresh(self) -> None:
+        """
+        Reload the contents from disk.
+        Use after files have changed outside the object context.
+        """
+        self.contents = list(self.{{ classname|lower }}_dir.iterdir())
+
+    def is_empty(self) -> bool:
+        return not self.contents
+
+    def snapshot(self, target_dir: Path):
+        shutil.copytree(self.{{ classname|lower }}_dir, target_dir)
+
+    def to_dict(self) -> dict:
+        return {
+            "path": str(self.{{ classname|lower }}_dir),
+            "id": self._id,
+            "items": [f.name for f in self.contents]
+        }
+
+    def copy_to(self, dest_dir: Path):
+        sm.validate_directory(dest_dir)
+        for f in self.{{ classname|lower }}_dir.iterdir():
+            shutil.copy2(f, dest_dir / f.name)
+
+    ### {{ classname|title }} Methods ###
+    @classmethod
+    def from_dict(cls, inst, data: dict):
+        obj = cls(inst)
+        obj._id = data.get("id", "")
+        return obj
+
     @classmethod
     def class_method(cls):
         """
-        Placeholder classname method.
-        - Uses classname reference (`cls`)
+        Placeholder class method.
+        - Uses class reference (`cls`)
         """
         return cls.__name__
 
     ### Static Methods ###
+    @staticmethod
+    def verify_or_create_file(self, file_path: Path, label: str = "file") -> Path:
+        """
+        Verifies that a file exists at `file_path`, optionally creates it.
+        Returns the file path even if sm.exists fails, as long as the file exists.
+        """
+        try:
+            verified_path, was_file_created = sm.exists(path=file_path, create_if_missing=True)
+            return Path(verified_path)
+        except Exception as e:
+            if file_path.exists():
+                return file_path  # fallback: file is there, ignore sm.exists error
+            raise RuntimeError(f"sm.exists() is broken — could not create {label}: {e}")
+
     @staticmethod
     def static_method(arg):
         """
@@ -151,7 +199,7 @@ class {{ classname }}:
         Example:
             <Boilerplate path='/home/user/project'>
         """
-        return f"<{self.__class__.__name__} path='{self.class_dir}'>"
+        return f"<{self.__class__.__name__} path='{self.{{ classname|lower }}_dir}'>"
 
     def __str__(self) -> str:
         """
@@ -160,7 +208,7 @@ class {{ classname }}:
         Example:
             Boilerplate at '/home/user/project' with 5 items
         """
-        return f"{self.__class__.__name__} at '{self.class_dir}' with {len(self)} items"
+        return f"{self.__class__.__name__} at '{self.{{ classname|lower }}_dir}' with {len(self)} items"
 
     def __bool__(self) -> bool:
         """
@@ -169,16 +217,16 @@ class {{ classname }}:
         Enables:
             if obj: ...
         """
-        return self.class_dir.exists() and self.class_dir.is_dir()
+        return self.{{ classname|lower }}_dir.exists() and self.{{ classname|lower }}_dir.is_dir()
 
     def __eq__(self, other: object) -> bool:
         """
-        Check if two {{ classname }} instances point to the same directory.
+        Check if two {{ classname|title }} instances point to the same directory.
 
         Returns:
             bool: True if same type and same path.
         """
-        return isinstance(other, {{ classname }}) and self.class_dir == other.class_dir
+        return isinstance(other, {{ classname|title }}) and self.{{ classname|lower }}_dir == other.{{ classname|lower }}_dir
 
     def __len__(self) -> int:
         """
@@ -222,12 +270,11 @@ class {{ classname }}:
         """
         return iter(self.contents)
 
-    def refresh(self) -> None:
-        """
-        Reload the contents from disk.
-        Use after files have changed outside the object context.
-        """
-        self.contents = list(self.class_dir.iterdir())
+    def __hash__(self):
+        return hash(self.{{ classname|lower }}_dir)
+
+    def __json__(self):
+        return self.to_dict()
 
 ### Fixtures ###
 
@@ -248,7 +295,7 @@ Fixtures
     - Simulates a syntactically invalid directory string.
     - Used to test path validation and error handling in init routines.
 
-2. broken_main_directory:
+2. broken_{{ mainname|lower }}_directory:
     - Returns an instance with a broken pdir attribute set to a corrupt path.
     - Triggers FileNotFoundError or path-based logic errors during instantiation.
 
@@ -257,7 +304,7 @@ Fixtures
     - Useful for testing string methods, formatting, or casing.
 
 4. sample_object:
-    - Dummy classname with a single `.value = 42` attribute.
+    - Dummy class with a single `.value = 42` attribute.
     - Used to test generic object attribute access or mocking.
 
 5. sample_tuple:
@@ -286,114 +333,217 @@ Fixtures
     - Tests dict key validation or serialization constraints.
 """
 
+# ─── Fixtures ──────────────────────────────────────────────────────────
+
 @pytest.fixture
-def temp_{{ classname }}(tmp_path):
-    """Creates a {{ classname }} instance with a temporary directory."""
-    main = {{ mainname }}(pdir=tmp_path)
-    instance = {{ classname }}(inst=main)
-    return instance
+def tmp_dir(tmp_path: Path) -> Path:
+    """A clean temporary project directory."""
+    return tmp_path
 
-def test_repr_returns_expected_string(temp_{{ classname }}):
-    result = repr(temp_{{ classname }})
-    assert result.startswith("<{{ classname }} path='")
-    assert str(temp_{{ classname }}.class_dir) in result
+@pytest.fixture
+def {{ mainname|lower }}_instance(tmp_dir: Path) -> {{ mainname|title }}:
+    """A {{ mainname|title }} instance rooted at an empty tmp_dir."""
+    return {{ mainname|title }}(pdir=tmp_dir)
 
-def test_str_returns_human_readable(temp_{{ classname }}):
-    expected_prefix = f"{{ classname }} at '{temp_{{ classname }}.class_dir}' with"
-    assert str(temp_{{ classname }}).startswith(expected_prefix)
-
-def test_bool_true_when_valid_dir(temp_{{ classname }}):
-    assert bool(temp_{{ classname }}) is True
-
-def test_bool_false_when_path_deleted(tmp_path):
-    main = {{ mainname }}(pdir=tmp_path)
-    instance = {{ classname }}(inst=main)
-    instance.class_dir.rmdir()
-    assert bool(instance) is False
-
-def test_eq_same_path_same_object(tmp_path):
-    main1 = {{ mainname }}(pdir=tmp_path)
-    main2 = {{ mainname }}(pdir=tmp_path)
-    c1 = {{ classname }}(inst=main1)
-    c2 = {{ classname }}(inst=main2)
-    assert c1 == c2
+@pytest.fixture
+def {{ classname|lower }}_instance({{ mainname|lower }}_instance: {{ mainname|title }}) -> {{ classname|title }}:
+    """A {{ classname|title }} instance created from a valid {{ mainname|title }}."""
+    return {{ classname|title }}(inst={{ mainname|lower }}_instance)
 
 
-def test_eq_different_path_objects(tmp_path):
-    path_a = tmp_path / "a"
-    path_b = tmp_path / "b"
-    path_a.mkdir()
-    path_b.mkdir()
+# ─── Tests for {{ mainname|title }} ─────────────────────────────────────────────────────
 
-    main1 = {{ mainname }}(pdir=path_a)
-    main2 = {{ mainname }}(pdir=path_b)
-    c1 = {{ classname }}(inst=main1)
-    c2 = {{ classname }}(inst=main2)
+class Test{{ mainname|title }}:
+    def test_default_pdir_is_set_correctly(self, tmp_dir):
+        m = {{ mainname|title }}(pdir=tmp_dir)
+        assert isinstance(m.pdir, Path)
+        assert m.pdir == tmp_dir
 
-    assert c1 != c2
-
-def test_len_counts_files_correctly(temp_{{ classname }}):
-    temp_{{ classname }}.refresh()  # Ensure accurate baseline
-    initial_count = len(temp_{{ classname }})
-
-    (temp_{{ classname }}.class_dir / "file1.txt").write_text("A")
-    (temp_{{ classname }}.class_dir / "file2.txt").write_text("B")
-    temp_{{ classname }}.refresh()
-
-    expected = initial_count + 2
-    assert len(temp_{{ classname }}) == expected
-
-def test_contains_checks_file_by_name(temp_{{ classname }}):
-    (temp_{{ classname }}.class_dir / "testfile.txt").write_text("data")
-    temp_{{ classname }}.refresh()
-    assert "testfile.txt" in temp_{{ classname }}
-    assert "nonexistent.txt" not in temp_{{ classname }}
-
-def test_getitem_returns_path_by_index(temp_{{ classname }}):
-    file1 = temp_{{ classname }}.class_dir / "file1.txt"
-    file2 = temp_{{ classname }}.class_dir / "file2.txt"
-    file1.write_text("one")
-    file2.write_text("two")
-    temp_{{ classname }}.refresh()
-    assert temp_{{ classname }}[0].name in {"file1.txt", "file2.txt"}
-    assert isinstance(temp_{{ classname }}[0], Path)
-
-def test_iter_yields_all_contents(temp_{{ classname }}):
-    files = ["a.txt", "b.txt", "c.txt"]
-    for name in files:
-        (temp_{{ classname }}.class_dir / name).write_text("data")
-    temp_{{ classname }}.refresh()
-    names = [f.name for f in temp_{{ classname }}]
-    for name in files:
-        assert name in names
-
-def test_refresh_updates_internal_file_list(temp_{{ classname }}):
-    temp_{{ classname }}.refresh()  # Ensure contents is accurate
-    initial_count = len(temp_{{ classname }})
-
-    new_file = temp_{{ classname }}.class_dir / "new.txt"
-    new_file.write_text("added later")
-
-    temp_{{ classname }}.refresh()
-    assert len(temp_{{ classname }}) == initial_count + 1
-    assert "new.txt" in temp_{{ classname }}
-
-### Tests for Method ###
-
-def test_dynamic_method_returns_argument(temp_{{ classname }}):
-    """Ensure dynamic_method echoes the input value using instance."""
-    assert temp_{{ classname }}.dynamic_method("value") == "value"
-    assert temp_{{ classname }}.dynamic_method(123) == 123
+    def test_{{ mainname|lower }}_raises_file_not_found_for_invalid_dir(self, tmp_path):
+        bad = tmp_path / "does_not_exist"
+        with pytest.raises(FileNotFoundError):
+            {{ mainname|title }}(pdir=bad)
 
 
-def test_class_method_returns_class_name():
-    """Ensure class_method returns the name of the classname as a string."""
-    result = {{ classname }}.class_method()
-    assert isinstance(result, str)
-    assert result == "{{ classname }}"
+# ─── Initialization & Directory Tests for {{ classname|title }} ────────────────────────
+
+class Test{{ classname|title }}Initialization:
+    def test_requires_valid_instance(self, tmp_dir):
+        # anything without __dict__ should fail validation
+        with pytest.raises(RuntimeError):
+            {{ classname|title }}(inst="not_a_{{ mainname|title }}")
+
+    def test_{{ classname|lower }}_dir_is_created(self, {{ mainname|lower }}_instance, tmp_dir):
+        _ = {{ classname|title }}(inst={{ mainname|lower }}_instance)  # Instantiation creates the directory
+        {{ classname|lower }}_dir = tmp_dir / "{{ classname|title }}"
+        assert {{ classname|lower }}_dir.exists() and {{ classname|lower }}_dir.is_dir()
 
 
-def test_static_method_returns_argument():
-    """Ensure static_method echoes the input value."""
-    assert {{ classname }}.static_method("static") == "static"
-    assert {{ classname }}.static_method(42) == 42
+# ─── Magic‐Method & Sequence‐Behavior Tests for {{ classname|title }} ────────────────────
+
+class Test{{ classname|title }}MagicMethods:
+    def test_repr_shows_class_name_and_path(self, {{ classname|lower }}_instance):
+        expected = f"<{{ classname|title }} path='{{{ classname|lower }}_instance.{{ classname|lower }}_dir}'>"
+        assert repr({{ classname|lower }}_instance) == expected
+
+    def test_str_includes_item_count(self, {{ classname|lower }}_instance):
+        s = str({{ classname|lower }}_instance)
+        assert {{ classname|lower }}_instance.{{ classname|lower }}_dir.name in s
+        assert f"with {len({{ classname|lower }}_instance)} items" in s
+
+    def test_bool_reflects_directory_existence(self, {{ classname|lower }}_instance, tmp_dir):
+        assert bool({{ classname|lower }}_instance) is True
+
+        # remove folder → __bool__ should now be False
+        inst = {{ classname|title }}(inst={{ mainname|title }}(pdir=tmp_dir))
+        inst.{{ classname|lower }}_dir.rmdir()
+        assert not bool(inst)
+
+    def test_equality_on_same_and_different_paths(self, tmp_dir):
+        # same path → equal
+        m1 = {{ mainname|title }}(pdir=tmp_dir)
+        m2 = {{ mainname|title }}(pdir=tmp_dir)
+        c1 = {{ classname|title }}(inst=m1)
+        c2 = {{ classname|title }}(inst=m2)
+        assert c1 == c2
+        assert not (c1 != c2)
+
+        # different paths → not equal
+        d1 = tmp_dir / "a"; d2 = tmp_dir / "b"
+        d1.mkdir(); d2.mkdir()
+        c3 = {{ classname|title }}(inst={{ mainname|title }}(pdir=d1))
+        c4 = {{ classname|title }}(inst={{ mainname|title }}(pdir=d2))
+        assert c3 != c4
+
+    def test_len_contains_getitem_iter_and_refresh(self, {{ classname|lower }}_instance):
+        # start empty
+        initial = len({{ classname|lower }}_instance)
+        assert initial == 0
+
+        # add files
+        for name in ("a.txt", "b.txt"):
+            ({{ classname|lower }}_instance.{{ classname|lower }}_dir / name).write_text("x")
+        {{ classname|lower }}_instance.refresh()
+
+        # length updated
+        assert len({{ classname|lower }}_instance) == initial + 2
+
+        # __contains__
+        assert "a.txt" in {{ classname|lower }}_instance
+        assert "missing.txt" not in {{ classname|lower }}_instance
+
+        # __getitem__ and IndexError
+        assert ({{ classname|lower }}_instance[0].name in {"a.txt", "b.txt"})
+        with pytest.raises(IndexError):
+            _ = {{ classname|lower }}_instance[999]
+
+        # __iter__
+        names = sorted(p.name for p in {{ classname|lower }}_instance)
+        assert names == sorted(["a.txt", "b.txt"])
+
+
+# ─── API‐Method Tests for {{ classname|title }} ──────────────────────────────────────────
+
+class Test{{ classname|title }}Methods:
+    def test_dynamic_method_echoes_argument(self, {{ classname|lower }}_instance):
+        for val in ("hi", 123, None):
+            assert {{ classname|lower }}_instance.dynamic_method(val) == val
+
+    def test_class_method_returns_class_name(self):
+        assert {{ classname|title }}.class_method() == "{{ classname|title }}"
+
+    def test_static_method_passthrough(self):
+        for val in ("xyz", 3.14, [1, 2, 3]):
+            assert {{ classname|title }}.static_method(val) == val
+
+    def test_dynamic_method_handles_exceptions_gracefully(self, {{ classname|lower }}_instance):
+        def failing_func(x): raise ValueError("intentional")
+
+        with pytest.raises(ValueError):
+            _ = {{ classname|lower }}_instance.dynamic_method(failing_func("fail"))
+
+# ─── File Handling Tests for {{ classname|title }} ──────────────────────────────────────────
+
+class Test{{ classname|title }}FileHandling:
+
+    def test_creates_new_file(self, {{ classname|lower }}_instance):
+        """Test that a missing file is created by verify_or_create_file."""
+        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "created_file.txt"
+
+        result = {{ classname|lower }}_instance.verify_or_create_file({{ classname|lower }}_instance, file_path, label="test file")
+
+        assert result.exists()
+        assert result.is_file()
+        assert result == file_path
+
+
+    def test_returns_existing_file(self, {{ classname|lower }}_instance):
+        """Test that an existing file is returned without error."""
+        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "existing_file.txt"
+        file_path.write_text("preexisting")
+
+        result = {{ classname|lower }}_instance.verify_or_create_file({{ classname|lower }}_instance, file_path, label="test file")
+
+        assert result == file_path
+        assert result.read_text() == "preexisting"
+
+
+    def test_fails_gracefully_when_file_cannot_be_created(self, monkeypatch, {{ classname|lower }}_instance):
+        """Simulate sm.exists() throwing and file not being created."""
+        def mock_exists(path, create_if_missing=True):
+            raise FileNotFoundError("simulated failure")
+
+        monkeypatch.setattr(sm, "exists", mock_exists)
+
+        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "fail.txt"
+
+        with pytest.raises(RuntimeError) as excinfo:
+            {{ classname|title }}.verify_or_create_file({{ classname|lower }}_instance, file_path, label="broken")
+
+        assert "could not create broken" in str(excinfo.value)
+
+
+    def test_returns_none_if_file_exists_after_failure(self, monkeypatch, {{ classname|lower }}_instance):
+        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "race_condition.txt"
+        file_path.touch()
+
+        def mock_exists(path, create_if_missing=True):
+            raise FileNotFoundError("simulated flaky condition")
+
+        monkeypatch.setattr(sm, "exists", mock_exists)
+
+        result = {{ classname|title }}.verify_or_create_file({{ classname|lower }}_instance, file_path, label="fallback")
+        assert result.exists()
+        assert result == file_path
+
+    def test_refresh_resets_contents(self, {{ classname|lower }}_instance):
+        assert len({{ classname|lower }}_instance) == 0
+        ({{ classname|lower }}_instance.{{ classname|lower }}_dir / "new.txt").write_text("test")
+        {{ classname|lower }}_instance.refresh()
+        assert "new.txt" in {{ classname|lower }}_instance
+
+    def test_write_and_read_file(self, {{ classname|lower }}_instance):
+        test_file = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "sample.txt"
+        test_file.write_text("hello world")
+        assert test_file.exists()
+        assert test_file.read_text() == "hello world"
+
+    def test_snapshot_creates_copy(self, tmp_path, {{ classname|lower }}_instance):
+        ({{ classname|lower }}_instance.{{ classname|lower }}_dir / "x.txt").write_text("data")
+        target = tmp_path / "clone"
+        {{ classname|lower }}_instance.snapshot(target)
+        assert (target / "x.txt").exists()
+
+    def test_copy_to_creates_duplicates(self, tmp_path, {{ classname|lower }}_instance):
+        ({{ classname|lower }}_instance.{{ classname|lower }}_dir / "a.txt").write_text("x")
+        new_dir = tmp_path / "dest"
+        {{ classname|lower }}_instance.copy_to(new_dir)
+        assert (new_dir / "a.txt").exists()
+
+# ─── Misc Handling Tests for {{ classname|title }} ──────────────────────────────────────────
+
+class Test{{ classname|title }}Misc:
+
+    def test_to_dict_has_keys(self, {{ classname|lower }}_instance):
+        d = {{ classname|lower }}_instance.to_dict()
+        assert "path" in d and "id" in d and "items" in d
