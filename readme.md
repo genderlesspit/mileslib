@@ -296,3 +296,100 @@ ml.logger.info("Logger is working")
 * Fully documented internal system
 * Sign-off-ready build
 
+# Sprint 2 (Week 2): Project Scaffolding CLI
+
+## Weekly Objective
+
+Build a CLI-driven scaffolding engine using `mileslib init` that generates a backend project based on FastAPI or Django with PostgreSQL, .env injection, and Azure-ready deployment files.
+
+---
+
+## Day-by-Day Breakdown
+
+### Day 1 (Monday): Scaffold Planning + CLI Interface
+
+**Goal:** Define CLI UX and stub out subcommands.
+
+**Tasks:**
+
+* Finalize `mileslib init` syntax and CLI help text
+* Add `--stack` flag with options: `django`, `fastapi`, `azure-hybrid`
+* Create `cli.main:init()` with logging and `click.pass_context`
+* Stub `scaffold/project_init.py:run_init()` with print/log output
+* Log CLI activity to shared logger
+
+**Checkpoint:** `mileslib init testproject --stack fastapi` prints expected messages
+
+---
+
+### Day 2 (Tuesday): Template System + FastAPI Bootstrap
+
+**Goal:** Lay foundation for a template system and render FastAPI.
+
+**Tasks:**
+
+* Create `templates/fastapi/` directory
+* Write `render_folder(template_dir, dest_dir, context)` logic using Jinja2
+* Add `.env`, `Dockerfile`, `README.md` placeholders
+* Generate `main.py`, `app/`, and `requirements.txt` with async route
+* Log completed scaffolds to CLI output and logger
+
+**Checkpoint:** Local FastAPI app bootable from CLI-generated folder
+
+---
+
+### Day 3 (Wednesday): Django Stack Integration
+
+**Goal:** Enable Django template generation with optional AAD support.
+
+**Tasks:**
+
+* Create `templates/django/` with base project
+* Add `manage.py`, `settings.py`, and `wsgi.py`
+* Inject optional AAD logic via `django-auth-adfs`
+* Unify `.env` layout with FastAPI
+* Validate project is bootable with SQLite or local PostgreSQL
+
+**Checkpoint:** Both Django and FastAPI can be generated from CLI with `--stack`
+
+---
+
+### Day 4 (Thursday): PostgreSQL Config + Shared Env
+
+**Goal:** Enable stack-neutral .env and PostgreSQL configuration.
+
+**Tasks:**
+
+* Add `DATABASE_URL` and `SECRET_KEY` to `.env`
+* Inject `python-dotenv` or `os.environ` loading logic
+* Add Dockerfile for PostgreSQL in both stacks
+* Add `mileslib.scaffold.env_util` to parse, validate, and inject envs
+* Confirm apps run with `.env` settings via `uvicorn` or `runserver`
+
+**Checkpoint:** CLI-generated apps connect to PostgreSQL using `.env`
+
+---
+
+### Day 5 (Friday): Docs, Tests, Final Polish
+
+**Goal:** Polish CLI UX and wrap test + doc coverage.
+
+**Tasks:**
+
+* Add CLI usage examples to README
+* Write tests for CLI commands with `CliRunner`
+* Validate idempotency (re-run into existing dir = handled gracefully)
+* Confirm `--stack` logic triggers correct template
+* Finish test coverage and push results to HTML
+
+**Checkpoint:** CLI, templates, and .env logic fully covered and documented
+
+---
+
+## Deliverables by End of Week
+
+* `mileslib init <name> --stack <stack>` CLI tool
+* Template engine supporting Django and FastAPI
+* PostgreSQL and .env config for local/remote
+* Project logs on CLI usage
+* Dev-ready backend generated with one command
