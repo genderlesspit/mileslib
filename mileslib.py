@@ -522,5 +522,6 @@ class Logger:
         self.contents = list(self.class_dir.iterdir())
 
 if __name__ == "__main__":
-    #Miles Lib Instance
-    m = MilesLib()
+    # CLI bootstraps to mileslib.cli.main:cli
+    from cli.main import cli
+    cli()

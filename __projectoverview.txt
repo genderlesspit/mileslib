@@ -179,13 +179,13 @@ L	Timer output logs
 ________________________________________
 Day 4 (Thursday): CLI Entrypoint + Pytest Scaffolding
 Objective: Add command-line interface and unit test harness.
-•	Create cli/__init__.py and __main__.py
-o	Add mileslib init stub with argparse
-o	Run dummy command: mileslib init testproject
-•	Create tests/test_log.py, test_config.py
-•	Add pytest.ini, install pytest
-•	Run all core tests + fix failures
-•	Commit: basic CLI and tested modules
+Y	Create cli/__init__.py and __main__.py
+Y	Add mileslib init stub with click
+Y	Run dummy command: mileslib init testproject
+Y	Create tests/dev/test_log.py, test_config.py
+Y	Add pytest.ini, install pytest
+Y	Run all core tests + fix failures
+Y	Commit: basic CLI and tested modules
 ________________________________________
 Day 5 (Friday): Cleanup, Coverage, Docs
 Objective: Polish week’s output, prep for Sprint 2 scaffolding work.

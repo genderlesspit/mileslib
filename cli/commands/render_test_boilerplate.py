@@ -3,13 +3,11 @@ import sys
 from pathlib import Path
 import click
 from jinja2 import Environment, FileSystemLoader
+from mileslib import StaticMethods as sm
 
 # point at your repo root so `from staticmethods import …` still works
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
-from staticmethods import StaticMethods as sm
-
 
 @click.command(context_settings={"ignore_unknown_options": True})
 @click.argument("classname", metavar="classname")
@@ -19,19 +17,19 @@ from staticmethods import StaticMethods as sm
     show_default=True,
     help="Optional name for the main class (used for {{ mainname }})",
 )
-def render_test_boilerplate(classname: str, mainname: str):
+def run(classname: str, mainname: str = "Main"):
     """
     CLI to render a Python boilerplate class from a Jinja2 template into tests/.dev/.
 
     Usage:
-      python tests/_render_test_boilerplate.py MyClassName --mainname PlaceholderMain
+      python tests/render_test_boilerplate.py MyClassName --mainname PlaceholderMain
 
     This renders:
       {pdir}/tests/_test_boilerplate.j2  →  {pdir}/tests/.dev/test_<classname>.py
     """
     # --- exactly your original paths: ---
     pdir = ROOT
-    tpl_path = sm.validate_file(pdir / "tests" / "_test_boilerplate.j2")
+    tpl_path = sm.validate_file(pdir / "config" / "_test_boilerplate.j2")
     out_dir  = pdir / "tests" / ".dev"
     sm.validate_directory(out_dir)
 
@@ -51,6 +49,5 @@ def render_test_boilerplate(classname: str, mainname: str):
     out_file.write_text(rendered, encoding="utf-8")
     click.echo(f"✅ Created: {out_file}")
 
-
 if __name__ == "__main__":
-    render_test_boilerplate()
+    run()
