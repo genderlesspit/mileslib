@@ -1,0 +1,19 @@
+[run]
+branch = True
+source = mileslib
+omit =
+    */__init__.py
+    */__main__.py
+    */tests/*
+
+[report]
+skip_covered = True
+show_missing = True
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:  # CLI bootstrap
+    def __repr__
+    def __str__
+
+[html]
+directory = htmlcov

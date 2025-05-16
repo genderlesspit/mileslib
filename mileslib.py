@@ -438,88 +438,69 @@ class Logger:
 
         return structlog.get_logger()
 
-    def __repr__(self):
-        return (
-            f"<Logger id='{self._id}' "
-            f"path='{self.log_dir}' "
-            f"file='{self.log_file_dir.name}'>"
-        )
-
-    def __str__(self) -> str:
-        """
-        Return a human-readable string describing the object.
-
-        Example:
-            Boilerplate at '/home/user/project' with 5 items
-        """
-        return f"{self.__class__.__name__} at '{self.class_dir}' with {len(self)} items"
-
-    def __bool__(self) -> bool:
-        """
-        Return True if the backing directory exists and is valid.
-
-        Enables:
-            if obj: ...
-        """
-        return self.class_dir.exists() and self.class_dir.is_dir()
-
-    def __eq__(self, other: object) -> bool:
-        """
-        Check if two Logger instances point to the same directory.
-
-        Returns:
-            bool: True if same type and same path.
-        """
-        return isinstance(other, Logger) and self.class_dir == other.class_dir
-
-    def __len__(self) -> int:
-        """
-        Return the number of files/subdirs inside the directory.
-
-        Returns:
-            int: Number of immediate entries in the path.
-        """
-        return len(self.contents)
-
-    def __contains__(self, filename: str) -> bool:
-        """
-        Check if a file with the given name exists inside the directory.
-
-        Args:
-            filename (str): Name to check for (not full path).
-
-        Returns:
-            bool: True if file exists by name.
-        """
-        return any(f.name == filename for f in self.contents)
-
-    def __getitem__(self, index: int) -> Path:
-        """
-        Allow indexed access to contents (like a list).
-
-        Args:
-            index (int): Position in the contents list.
-
-        Returns:
-            Path: File or directory at that position.
-        """
-        return self.contents[index]
-
-    def __iter__(self) -> Iterator[Path]:
-        """
-        Make the object iterable over its contents.
-
-        Returns:
-            Iterator[Path]: Iterator over Path objects inside pdir.
-        """
-        return iter(self.contents)
-
     def refresh(self) -> None:
         """
         Reload the contents from disk.
         Use after files have changed outside the object context.
         """
         self.contents = list(self.class_dir.iterdir())
+
+class Config:
+    def __init__(self, inst):
+        """
+        Initializes the Config class for the client. A subclass of the main MilesLib instance.
+        Validates the incoming instance and its directory before proceeding.
+        """
+        StaticMethods.validate_instance(inst=inst)
+        self.m = inst
+        self.pdir = StaticMethods.validate_instance_directory(pdir=self.m.pdir)
+
+        # Directory Initialization
+        self.cfg_dir = os.path.join(self.pdir, "config")
+        StaticMethods.validate_directory(self.cfg_dir)
+        self.cfg_file = self.build_config(self.cfg_dir)
+
+    @staticmethod
+    def build_config(cfg_dir):
+        file = os.path.join(cfg_dir, "config.json")
+        if os.path.exists(file):
+            build: Path = StaticMethods.validate_file(file)
+            return build
+        else:
+            build: Path = StaticMethods.ensure_file_with_default("config/config.json",
+                                                        default={"app_name": "MilesApp", "version": "1.0"})
+            return build
+
+    def get(self, *args: str | list | tuple):
+        file = self.cfg_file
+        for arg in args:
+            if not isinstance(arg, (str, int)):
+                raise TypeError(f"Invalid path for config.get(): {arg!r} must be str, list, or int")
+
+        def load_and_traverse():
+            if os.stat(file).st_size == 0:
+                StaticMethods.ensure_file_with_default("config/config.json",
+                                                        default={"app_name": "MilesApp", "version": "1.0"})
+            with open(file, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+
+            return StaticMethods.traverse_dictionary(config_data, *args)
+
+        try:
+            setting = StaticMethods.recall(
+                fn=load_and_traverse,
+                max_attempts=3,
+                handled_exceptions=(json.JSONDecodeError, FileNotFoundError)
+            )
+
+            if setting is None:
+                raise Exception(f"Requested setting not found in {file}. Please amend.")
+            return setting
+
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid JSON in {file}: {e}")
+        except Exception as e:
+            raise RuntimeError(f"Unexpected error reading {file}: {e}")
 
 if __name__ == "__main__":
     # CLI bootstraps to mileslib.cli.main:cli
