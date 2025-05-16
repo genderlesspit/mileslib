@@ -131,7 +131,7 @@ class TestManager:
                     if cls.__module__ != name:
                         continue
 
-                    self.m.log.info(f"Class: {class_name} found.")
+                    self.m.log.info(f"PlaceholderClass: {class_name} found.")
 
                     methods = [
                         method_name for method_name, _ in
@@ -185,7 +185,7 @@ class TestManager:
                               static_tpl: str = None):
         """
         Combines:
-          - Class-based fixtures per module in tests/<module>/conftest.py
+          - PlaceholderClass-based fixtures per module in tests/<module>/conftest.py
           - Static file fixtures in tests/conftest.py
 
         :param discovery_map: {module.py: {ClassName: [methods]}}

@@ -167,15 +167,15 @@ Y	Unit tests: config load success/fail, missing paths
 ________________________________________
 Day 3 (Wednesday): Request Wrapper + Timer Utility
 Objective: Build fault-tolerant request and performance timer utilities.
-X	Write request.py:
-X	http_get(url, retries=3)
-X	http_post(url, data, retries=3)
-X	Use requests with backoff + log failures
-X	Write timer.py:
-X	@timer(label="operation") decorator to log duration
-X	Add tests:
-X	Retry behavior
-X	Timer output logs
+Y	Write request.py:
+Y	http_get(url, retries=3)
+Y	http_post(url, data, retries=3)
+Y	Use requests with backoff + log failures
+Y	Write timer.py:
+Y	@timer(label="operation") decorator to log duration
+Y	Add tests:
+Y	Retry behavior
+L	Timer output logs
 ________________________________________
 Day 4 (Thursday): CLI Entrypoint + Pytest Scaffolding
 Objective: Add command-line interface and unit test harness.

@@ -15,7 +15,7 @@ from staticmethods import StaticMethods as sm
 @click.argument("classname", metavar="classname")
 @click.option(
     "--mainname",
-    default="Main",
+    default="PlaceholderMain",
     show_default=True,
     help="Optional name for the main class (used for {{ mainname }})",
 )
@@ -24,7 +24,7 @@ def render_test_boilerplate(classname: str, mainname: str):
     CLI to render a Python boilerplate class from a Jinja2 template into tests/.dev/.
 
     Usage:
-      python tests/_render_test_boilerplate.py MyClassName --mainname Main
+      python tests/_render_test_boilerplate.py MyClassName --mainname PlaceholderMain
 
     This renders:
       {pdir}/tests/_test_boilerplate.j2  →  {pdir}/tests/.dev/test_<classname>.py
@@ -53,4 +53,4 @@ def render_test_boilerplate(classname: str, mainname: str):
 
 
 if __name__ == "__main__":
-    render_test_boilerplate(classname=input("classname= "))
+    render_test_boilerplate()

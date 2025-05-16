@@ -8,7 +8,7 @@ from unittest import mock
 from logging.handlers import RotatingFileHandler
 import os
 from datetime import datetime
-from staticmethods import StaticMethods as sm
+from mileslib import StaticMethods as sm
 
 ### Static Methods ###
 """
@@ -40,7 +40,7 @@ Methods Overview
 
 4. dependency(dep, pack):
     - Ensures a pip dependency is installed.
-    - Automatically installs if missing (dev-safe, not production-safe).
+    - Automatically installs if missing (.dev-safe, not production-safe).
 
 5. timer(fn, *args, **kwargs):
     - Times execution duration of a function call.

@@ -35,7 +35,7 @@ Methods Overview
 
 4. dependency(dep, pack):
     - Ensures a pip dependency is installed.
-    - Automatically installs if missing (dev-safe, not production-safe).
+    - Automatically installs if missing (.dev-safe, not production-safe).
 
 5. timer(fn, *args, **kwargs):
     - Times execution duration of a function call.
@@ -90,16 +90,16 @@ You should **never instantiate StaticMethods** — it is purely a namespace for 
 
 ### Script ###
 
-class Main:
+class PlaceholderMain:
     def __init__(self, pdir = None):
         '''
-        Parent instance of Class.
+        Parent instance of PlaceholderClass.
         :param pdir: Project directory, usually os.getcwd(), unless specified by config files.
         '''
         pdir = pdir or os.getcwd()
         self.pdir = sm.validate_instance_directory(pdir=pdir)
 
-class Class:
+class PlaceholderClass:
     def __init__(self, inst):
         """
         Generic class that operates on a passed-in RenderTestBoilerplate instance.
@@ -110,14 +110,14 @@ class Class:
         self.pdir = self.m.pdir
 
         # Directory Initialization
-        self.class_dir = self.pdir / "Class"
-        sm.validate_directory(self.class_dir)
+        self.placeholderclass_dir = self.pdir / "PlaceholderClass"
+        sm.validate_directory(self.placeholderclass_dir)
 
         #ID
         self._id = self.pdir.name
 
         #Contents
-        self.contents = list(self.class_dir.iterdir())  # ← FIXED LINE
+        self.contents = list(self.placeholderclass_dir.iterdir())  # ← FIXED LINE
 
     ### Dynamic Methods ###
     def dynamic_method(self, arg):
@@ -132,27 +132,27 @@ class Class:
         Reload the contents from disk.
         Use after files have changed outside the object context.
         """
-        self.contents = list(self.class_dir.iterdir())
+        self.contents = list(self.placeholderclass_dir.iterdir())
 
     def is_empty(self) -> bool:
         return not self.contents
 
     def snapshot(self, target_dir: Path):
-        shutil.copytree(self.class_dir, target_dir)
+        shutil.copytree(self.placeholderclass_dir, target_dir)
 
     def to_dict(self) -> dict:
         return {
-            "path": str(self.class_dir),
+            "path": str(self.placeholderclass_dir),
             "id": self._id,
             "items": [f.name for f in self.contents]
         }
 
     def copy_to(self, dest_dir: Path):
         sm.validate_directory(dest_dir)
-        for f in self.class_dir.iterdir():
+        for f in self.placeholderclass_dir.iterdir():
             shutil.copy2(f, dest_dir / f.name)
 
-    ### Class Methods ###
+    ### PlaceholderClass Methods ###
     @classmethod
     def from_dict(cls, inst, data: dict):
         obj = cls(inst)
@@ -169,7 +169,7 @@ class Class:
 
     ### Static Methods ###
     @staticmethod
-    def verify_or_create_file(self, file_path: Path, label: str = "file") -> Path:
+    def verify_or_create_file(file_path: Path, label: str = "file") -> Path:
         """
         Verifies that a file exists at `file_path`, optionally creates it.
         Returns the file path even if sm.exists fails, as long as the file exists.
@@ -197,7 +197,7 @@ class Class:
         Example:
             <Boilerplate path='/home/user/project'>
         """
-        return f"<{self.__class__.__name__} path='{self.class_dir}'>"
+        return f"<{self.__class__.__name__} path='{self.placeholderclass_dir}'>"
 
     def __str__(self) -> str:
         """
@@ -206,7 +206,7 @@ class Class:
         Example:
             Boilerplate at '/home/user/project' with 5 items
         """
-        return f"{self.__class__.__name__} at '{self.class_dir}' with {len(self)} items"
+        return f"{self.__class__.__name__} at '{self.placeholderclass_dir}' with {len(self)} items"
 
     def __bool__(self) -> bool:
         """
@@ -215,16 +215,16 @@ class Class:
         Enables:
             if obj: ...
         """
-        return self.class_dir.exists() and self.class_dir.is_dir()
+        return self.placeholderclass_dir.exists() and self.placeholderclass_dir.is_dir()
 
     def __eq__(self, other: object) -> bool:
         """
-        Check if two Class instances point to the same directory.
+        Check if two PlaceholderClass instances point to the same directory.
 
         Returns:
             bool: True if same type and same path.
         """
-        return isinstance(other, Class) and self.class_dir == other.class_dir
+        return isinstance(other, PlaceholderClass) and self.placeholderclass_dir == other.placeholderclass_dir
 
     def __len__(self) -> int:
         """
@@ -269,7 +269,7 @@ class Class:
         return iter(self.contents)
 
     def __hash__(self):
-        return hash(self.class_dir)
+        return hash(self.placeholderclass_dir)
 
     def __json__(self):
         return self.to_dict()
@@ -339,78 +339,78 @@ def tmp_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 @pytest.fixture
-def main_instance(tmp_dir: Path) -> Main:
-    """A Main instance rooted at an empty tmp_dir."""
-    return Main(pdir=tmp_dir)
+def main_instance(tmp_dir: Path) -> PlaceholderMain:
+    """A PlaceholderMain instance rooted at an empty tmp_dir."""
+    return PlaceholderMain(pdir=tmp_dir)
 
 @pytest.fixture
-def class_instance(main_instance: Main) -> Class:
-    """A Class instance created from a valid Main."""
-    return Class(inst=main_instance)
+def class_instance(main_instance: PlaceholderMain) -> PlaceholderClass:
+    """A PlaceholderClass instance created from a valid PlaceholderMain."""
+    return PlaceholderClass(inst=main_instance)
 
 
-# ─── Tests for Main ─────────────────────────────────────────────────────
+# ─── Tests for PlaceholderMain ─────────────────────────────────────────────────────
 
 class TestMain:
     def test_default_pdir_is_set_correctly(self, tmp_dir):
-        m = Main(pdir=tmp_dir)
+        m = PlaceholderMain(pdir=tmp_dir)
         assert isinstance(m.pdir, Path)
         assert m.pdir == tmp_dir
 
     def test_main_raises_file_not_found_for_invalid_dir(self, tmp_path):
         bad = tmp_path / "does_not_exist"
         with pytest.raises(FileNotFoundError):
-            Main(pdir=bad)
+            PlaceholderMain(pdir=bad)
 
 
-# ─── Initialization & Directory Tests for Class ────────────────────────
+# ─── Initialization & Directory Tests for PlaceholderClass ────────────────────────
 
 class TestClassInitialization:
     def test_requires_valid_instance(self, tmp_dir):
         # anything without __dict__ should fail validation
         with pytest.raises(RuntimeError):
-            Class(inst="not_a_Main")
+            PlaceholderClass(inst="not_a_Main")
 
     def test_class_dir_is_created(self, main_instance, tmp_dir):
-        _ = Class(inst=main_instance)  # Instantiation creates the directory
-        class_dir = tmp_dir / "Class"
+        _ = PlaceholderClass(inst=main_instance)  # Instantiation creates the directory
+        class_dir = tmp_dir / "PlaceholderClass"
         assert class_dir.exists() and class_dir.is_dir()
 
 
-# ─── Magic‐Method & Sequence‐Behavior Tests for Class ────────────────────
+# ─── Magic‐Method & Sequence‐Behavior Tests for PlaceholderClass ────────────────────
 
 class TestClassMagicMethods:
     def test_repr_shows_class_name_and_path(self, class_instance):
-        expected = f"<Class path='{class_instance.class_dir}'>"
+        expected = f"<PlaceholderClass path='{class_instance.placeholderclass_dir}'>"
         assert repr(class_instance) == expected
 
     def test_str_includes_item_count(self, class_instance):
         s = str(class_instance)
-        assert class_instance.class_dir.name in s
+        assert class_instance.placeholderclass_dir.name in s
         assert f"with {len(class_instance)} items" in s
 
     def test_bool_reflects_directory_existence(self, class_instance, tmp_dir):
         assert bool(class_instance) is True
 
         # remove folder → __bool__ should now be False
-        inst = Class(inst=Main(pdir=tmp_dir))
-        inst.class_dir.rmdir()
+        inst = PlaceholderClass(inst=PlaceholderMain(pdir=tmp_dir))
+        inst.placeholderclass_dir.rmdir()
         assert not bool(inst)
 
     def test_equality_on_same_and_different_paths(self, tmp_dir):
         # same path → equal
-        m1 = Main(pdir=tmp_dir)
-        m2 = Main(pdir=tmp_dir)
-        c1 = Class(inst=m1)
-        c2 = Class(inst=m2)
+        m1 = PlaceholderMain(pdir=tmp_dir)
+        m2 = PlaceholderMain(pdir=tmp_dir)
+        c1 = PlaceholderClass(inst=m1)
+        c2 = PlaceholderClass(inst=m2)
         assert c1 == c2
         assert not (c1 != c2)
 
         # different paths → not equal
         d1 = tmp_dir / "a"; d2 = tmp_dir / "b"
         d1.mkdir(); d2.mkdir()
-        c3 = Class(inst=Main(pdir=d1))
-        c4 = Class(inst=Main(pdir=d2))
+        c3 = PlaceholderClass(inst=PlaceholderMain(pdir=d1))
+        c4 = PlaceholderClass(inst=PlaceholderMain(pdir=d2))
         assert c3 != c4
 
     def test_len_contains_getitem_iter_and_refresh(self, class_instance):
@@ -420,7 +420,7 @@ class TestClassMagicMethods:
 
         # add files
         for name in ("a.txt", "b.txt"):
-            (class_instance.class_dir / name).write_text("x")
+            (class_instance.placeholderclass_dir / name).write_text("x")
         class_instance.refresh()
 
         # length updated
@@ -440,7 +440,7 @@ class TestClassMagicMethods:
         assert names == sorted(["a.txt", "b.txt"])
 
 
-# ─── API‐Method Tests for Class ──────────────────────────────────────────
+# ─── API‐Method Tests for PlaceholderClass ──────────────────────────────────────────
 
 class TestClassMethods:
     def test_dynamic_method_echoes_argument(self, class_instance):
@@ -448,11 +448,11 @@ class TestClassMethods:
             assert class_instance.dynamic_method(val) == val
 
     def test_class_method_returns_class_name(self):
-        assert Class.class_method() == "Class"
+        assert PlaceholderClass.class_method() == "PlaceholderClass"
 
     def test_static_method_passthrough(self):
         for val in ("xyz", 3.14, [1, 2, 3]):
-            assert Class.static_method(val) == val
+            assert PlaceholderClass.static_method(val) == val
 
     def test_dynamic_method_handles_exceptions_gracefully(self, class_instance):
         def failing_func(x): raise ValueError("intentional")
@@ -460,15 +460,15 @@ class TestClassMethods:
         with pytest.raises(ValueError):
             _ = class_instance.dynamic_method(failing_func("fail"))
 
-# ─── File Handling Tests for Class ──────────────────────────────────────────
+# ─── File Handling Tests for PlaceholderClass ──────────────────────────────────────────
 
 class TestClassFileHandling:
 
     def test_creates_new_file(self, class_instance):
         """Test that a missing file is created by verify_or_create_file."""
-        file_path = class_instance.class_dir / "created_file.txt"
+        file_path = class_instance.placeholderclass_dir / "created_file.txt"
 
-        result = class_instance.verify_or_create_file(class_instance, file_path, label="test file")
+        result = class_instance.verify_or_create_file(file_path, label="test file")
 
         assert result.exists()
         assert result.is_file()
@@ -477,10 +477,10 @@ class TestClassFileHandling:
 
     def test_returns_existing_file(self, class_instance):
         """Test that an existing file is returned without error."""
-        file_path = class_instance.class_dir / "existing_file.txt"
+        file_path = class_instance.placeholderclass_dir / "existing_file.txt"
         file_path.write_text("preexisting")
 
-        result = class_instance.verify_or_create_file(class_instance, file_path, label="test file")
+        result = class_instance.verify_or_create_file(file_path, label="test file")
 
         assert result == file_path
         assert result.read_text() == "preexisting"
@@ -493,16 +493,16 @@ class TestClassFileHandling:
 
         monkeypatch.setattr(sm, "exists", mock_exists)
 
-        file_path = class_instance.class_dir / "fail.txt"
+        file_path = class_instance.placeholderclass_dir / "fail.txt"
 
         with pytest.raises(RuntimeError) as excinfo:
-            Class.verify_or_create_file(class_instance, file_path, label="broken")
+            PlaceholderClass.verify_or_create_file(file_path, label="broken")
 
         assert "could not create broken" in str(excinfo.value)
 
 
     def test_returns_none_if_file_exists_after_failure(self, monkeypatch, class_instance):
-        file_path = class_instance.class_dir / "race_condition.txt"
+        file_path = class_instance.placeholderclass_dir / "race_condition.txt"
         file_path.touch()
 
         def mock_exists(path, create_if_missing=True):
@@ -510,35 +510,35 @@ class TestClassFileHandling:
 
         monkeypatch.setattr(sm, "exists", mock_exists)
 
-        result = Class.verify_or_create_file(class_instance, file_path, label="fallback")
+        result = PlaceholderClass.verify_or_create_file(file_path, label="fallback")
         assert result.exists()
         assert result == file_path
 
     def test_refresh_resets_contents(self, class_instance):
         assert len(class_instance) == 0
-        (class_instance.class_dir / "new.txt").write_text("test")
+        (class_instance.placeholderclass_dir / "new.txt").write_text("test")
         class_instance.refresh()
         assert "new.txt" in class_instance
 
     def test_write_and_read_file(self, class_instance):
-        test_file = class_instance.class_dir / "sample.txt"
+        test_file = class_instance.placeholderclass_dir / "sample.txt"
         test_file.write_text("hello world")
         assert test_file.exists()
         assert test_file.read_text() == "hello world"
 
     def test_snapshot_creates_copy(self, tmp_path, class_instance):
-        (class_instance.class_dir / "x.txt").write_text("data")
+        (class_instance.placeholderclass_dir / "x.txt").write_text("data")
         target = tmp_path / "clone"
         class_instance.snapshot(target)
         assert (target / "x.txt").exists()
 
     def test_copy_to_creates_duplicates(self, tmp_path, class_instance):
-        (class_instance.class_dir / "a.txt").write_text("x")
+        (class_instance.placeholderclass_dir / "a.txt").write_text("x")
         new_dir = tmp_path / "dest"
         class_instance.copy_to(new_dir)
         assert (new_dir / "a.txt").exists()
 
-# ─── Misc Handling Tests for Class ──────────────────────────────────────────
+# ─── Misc Handling Tests for PlaceholderClass ──────────────────────────────────────────
 
 class TestClassMisc:
 

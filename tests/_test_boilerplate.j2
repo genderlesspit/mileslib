@@ -1,5 +1,3 @@
-{# _test_boilerplate.j2 #}
-
 import shutil
 from typing import Iterator
 import pytest
@@ -171,7 +169,7 @@ class {{ classname|title }}:
 
     ### Static Methods ###
     @staticmethod
-    def verify_or_create_file(self, file_path: Path, label: str = "file") -> Path:
+    def verify_or_create_file(file_path: Path, label: str = "file") -> Path:
         """
         Verifies that a file exists at `file_path`, optionally creates it.
         Returns the file path even if sm.exists fails, as long as the file exists.
@@ -295,7 +293,7 @@ Fixtures
     - Simulates a syntactically invalid directory string.
     - Used to test path validation and error handling in init routines.
 
-2. broken_{{ mainname|lower }}_directory:
+2. broken_main_directory:
     - Returns an instance with a broken pdir attribute set to a corrupt path.
     - Triggers FileNotFoundError or path-based logic errors during instantiation.
 
@@ -341,25 +339,25 @@ def tmp_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 @pytest.fixture
-def {{ mainname|lower }}_instance(tmp_dir: Path) -> {{ mainname|title }}:
+def main_instance(tmp_dir: Path) -> {{ mainname|title }}:
     """A {{ mainname|title }} instance rooted at an empty tmp_dir."""
     return {{ mainname|title }}(pdir=tmp_dir)
 
 @pytest.fixture
-def {{ classname|lower }}_instance({{ mainname|lower }}_instance: {{ mainname|title }}) -> {{ classname|title }}:
+def class_instance(main_instance: {{ mainname|title }}) -> {{ classname|title }}:
     """A {{ classname|title }} instance created from a valid {{ mainname|title }}."""
-    return {{ classname|title }}(inst={{ mainname|lower }}_instance)
+    return {{ classname|title }}(inst=main_instance)
 
 
 # ─── Tests for {{ mainname|title }} ─────────────────────────────────────────────────────
 
-class Test{{ mainname|title }}:
+class TestMain:
     def test_default_pdir_is_set_correctly(self, tmp_dir):
         m = {{ mainname|title }}(pdir=tmp_dir)
         assert isinstance(m.pdir, Path)
         assert m.pdir == tmp_dir
 
-    def test_{{ mainname|lower }}_raises_file_not_found_for_invalid_dir(self, tmp_path):
+    def test_main_raises_file_not_found_for_invalid_dir(self, tmp_path):
         bad = tmp_path / "does_not_exist"
         with pytest.raises(FileNotFoundError):
             {{ mainname|title }}(pdir=bad)
@@ -371,28 +369,28 @@ class Test{{ classname|title }}Initialization:
     def test_requires_valid_instance(self, tmp_dir):
         # anything without __dict__ should fail validation
         with pytest.raises(RuntimeError):
-            {{ classname|title }}(inst="not_a_{{ mainname|title }}")
+            {{ classname|title }}(inst="not_a_Main")
 
-    def test_{{ classname|lower }}_dir_is_created(self, {{ mainname|lower }}_instance, tmp_dir):
-        _ = {{ classname|title }}(inst={{ mainname|lower }}_instance)  # Instantiation creates the directory
-        {{ classname|lower }}_dir = tmp_dir / "{{ classname|title }}"
-        assert {{ classname|lower }}_dir.exists() and {{ classname|lower }}_dir.is_dir()
+    def test_class_dir_is_created(self, main_instance, tmp_dir):
+        _ = {{ classname|title }}(inst=main_instance)  # Instantiation creates the directory
+        class_dir = tmp_dir / "{{ classname|title }}"
+        assert class_dir.exists() and class_dir.is_dir()
 
 
 # ─── Magic‐Method & Sequence‐Behavior Tests for {{ classname|title }} ────────────────────
 
 class Test{{ classname|title }}MagicMethods:
-    def test_repr_shows_class_name_and_path(self, {{ classname|lower }}_instance):
-        expected = f"<{{ classname|title }} path='{{{ classname|lower }}_instance.{{ classname|lower }}_dir}'>"
-        assert repr({{ classname|lower }}_instance) == expected
+    def test_repr_shows_class_name_and_path(self, class_instance):
+        expected = f"<{{ classname|title }} path='{class_instance.{{ classname|lower }}_dir}'>"
+        assert repr(class_instance) == expected
 
-    def test_str_includes_item_count(self, {{ classname|lower }}_instance):
-        s = str({{ classname|lower }}_instance)
-        assert {{ classname|lower }}_instance.{{ classname|lower }}_dir.name in s
-        assert f"with {len({{ classname|lower }}_instance)} items" in s
+    def test_str_includes_item_count(self, class_instance):
+        s = str(class_instance)
+        assert class_instance.{{ classname|lower }}_dir.name in s
+        assert f"with {len(class_instance)} items" in s
 
-    def test_bool_reflects_directory_existence(self, {{ classname|lower }}_instance, tmp_dir):
-        assert bool({{ classname|lower }}_instance) is True
+    def test_bool_reflects_directory_existence(self, class_instance, tmp_dir):
+        assert bool(class_instance) is True
 
         # remove folder → __bool__ should now be False
         inst = {{ classname|title }}(inst={{ mainname|title }}(pdir=tmp_dir))
@@ -415,39 +413,39 @@ class Test{{ classname|title }}MagicMethods:
         c4 = {{ classname|title }}(inst={{ mainname|title }}(pdir=d2))
         assert c3 != c4
 
-    def test_len_contains_getitem_iter_and_refresh(self, {{ classname|lower }}_instance):
+    def test_len_contains_getitem_iter_and_refresh(self, class_instance):
         # start empty
-        initial = len({{ classname|lower }}_instance)
+        initial = len(class_instance)
         assert initial == 0
 
         # add files
         for name in ("a.txt", "b.txt"):
-            ({{ classname|lower }}_instance.{{ classname|lower }}_dir / name).write_text("x")
-        {{ classname|lower }}_instance.refresh()
+            (class_instance.{{ classname|lower }}_dir / name).write_text("x")
+        class_instance.refresh()
 
         # length updated
-        assert len({{ classname|lower }}_instance) == initial + 2
+        assert len(class_instance) == initial + 2
 
         # __contains__
-        assert "a.txt" in {{ classname|lower }}_instance
-        assert "missing.txt" not in {{ classname|lower }}_instance
+        assert "a.txt" in class_instance
+        assert "missing.txt" not in class_instance
 
         # __getitem__ and IndexError
-        assert ({{ classname|lower }}_instance[0].name in {"a.txt", "b.txt"})
+        assert (class_instance[0].name in {"a.txt", "b.txt"})
         with pytest.raises(IndexError):
-            _ = {{ classname|lower }}_instance[999]
+            _ = class_instance[999]
 
         # __iter__
-        names = sorted(p.name for p in {{ classname|lower }}_instance)
+        names = sorted(p.name for p in class_instance)
         assert names == sorted(["a.txt", "b.txt"])
 
 
 # ─── API‐Method Tests for {{ classname|title }} ──────────────────────────────────────────
 
 class Test{{ classname|title }}Methods:
-    def test_dynamic_method_echoes_argument(self, {{ classname|lower }}_instance):
+    def test_dynamic_method_echoes_argument(self, class_instance):
         for val in ("hi", 123, None):
-            assert {{ classname|lower }}_instance.dynamic_method(val) == val
+            assert class_instance.dynamic_method(val) == val
 
     def test_class_method_returns_class_name(self):
         assert {{ classname|title }}.class_method() == "{{ classname|title }}"
@@ -456,55 +454,55 @@ class Test{{ classname|title }}Methods:
         for val in ("xyz", 3.14, [1, 2, 3]):
             assert {{ classname|title }}.static_method(val) == val
 
-    def test_dynamic_method_handles_exceptions_gracefully(self, {{ classname|lower }}_instance):
+    def test_dynamic_method_handles_exceptions_gracefully(self, class_instance):
         def failing_func(x): raise ValueError("intentional")
 
         with pytest.raises(ValueError):
-            _ = {{ classname|lower }}_instance.dynamic_method(failing_func("fail"))
+            _ = class_instance.dynamic_method(failing_func("fail"))
 
 # ─── File Handling Tests for {{ classname|title }} ──────────────────────────────────────────
 
 class Test{{ classname|title }}FileHandling:
 
-    def test_creates_new_file(self, {{ classname|lower }}_instance):
+    def test_creates_new_file(self, class_instance):
         """Test that a missing file is created by verify_or_create_file."""
-        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "created_file.txt"
+        file_path = class_instance.{{ classname|lower }}_dir / "created_file.txt"
 
-        result = {{ classname|lower }}_instance.verify_or_create_file({{ classname|lower }}_instance, file_path, label="test file")
+        result = class_instance.verify_or_create_file(file_path, label="test file")
 
         assert result.exists()
         assert result.is_file()
         assert result == file_path
 
 
-    def test_returns_existing_file(self, {{ classname|lower }}_instance):
+    def test_returns_existing_file(self, class_instance):
         """Test that an existing file is returned without error."""
-        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "existing_file.txt"
+        file_path = class_instance.{{ classname|lower }}_dir / "existing_file.txt"
         file_path.write_text("preexisting")
 
-        result = {{ classname|lower }}_instance.verify_or_create_file({{ classname|lower }}_instance, file_path, label="test file")
+        result = class_instance.verify_or_create_file(file_path, label="test file")
 
         assert result == file_path
         assert result.read_text() == "preexisting"
 
 
-    def test_fails_gracefully_when_file_cannot_be_created(self, monkeypatch, {{ classname|lower }}_instance):
+    def test_fails_gracefully_when_file_cannot_be_created(self, monkeypatch, class_instance):
         """Simulate sm.exists() throwing and file not being created."""
         def mock_exists(path, create_if_missing=True):
             raise FileNotFoundError("simulated failure")
 
         monkeypatch.setattr(sm, "exists", mock_exists)
 
-        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "fail.txt"
+        file_path = class_instance.{{ classname|lower }}_dir / "fail.txt"
 
         with pytest.raises(RuntimeError) as excinfo:
-            {{ classname|title }}.verify_or_create_file({{ classname|lower }}_instance, file_path, label="broken")
+            {{ classname|title }}.verify_or_create_file(file_path, label="broken")
 
         assert "could not create broken" in str(excinfo.value)
 
 
-    def test_returns_none_if_file_exists_after_failure(self, monkeypatch, {{ classname|lower }}_instance):
-        file_path = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "race_condition.txt"
+    def test_returns_none_if_file_exists_after_failure(self, monkeypatch, class_instance):
+        file_path = class_instance.{{ classname|lower }}_dir / "race_condition.txt"
         file_path.touch()
 
         def mock_exists(path, create_if_missing=True):
@@ -512,38 +510,38 @@ class Test{{ classname|title }}FileHandling:
 
         monkeypatch.setattr(sm, "exists", mock_exists)
 
-        result = {{ classname|title }}.verify_or_create_file({{ classname|lower }}_instance, file_path, label="fallback")
+        result = {{ classname|title }}.verify_or_create_file(file_path, label="fallback")
         assert result.exists()
         assert result == file_path
 
-    def test_refresh_resets_contents(self, {{ classname|lower }}_instance):
-        assert len({{ classname|lower }}_instance) == 0
-        ({{ classname|lower }}_instance.{{ classname|lower }}_dir / "new.txt").write_text("test")
-        {{ classname|lower }}_instance.refresh()
-        assert "new.txt" in {{ classname|lower }}_instance
+    def test_refresh_resets_contents(self, class_instance):
+        assert len(class_instance) == 0
+        (class_instance.{{ classname|lower }}_dir / "new.txt").write_text("test")
+        class_instance.refresh()
+        assert "new.txt" in class_instance
 
-    def test_write_and_read_file(self, {{ classname|lower }}_instance):
-        test_file = {{ classname|lower }}_instance.{{ classname|lower }}_dir / "sample.txt"
+    def test_write_and_read_file(self, class_instance):
+        test_file = class_instance.{{ classname|lower }}_dir / "sample.txt"
         test_file.write_text("hello world")
         assert test_file.exists()
         assert test_file.read_text() == "hello world"
 
-    def test_snapshot_creates_copy(self, tmp_path, {{ classname|lower }}_instance):
-        ({{ classname|lower }}_instance.{{ classname|lower }}_dir / "x.txt").write_text("data")
+    def test_snapshot_creates_copy(self, tmp_path, class_instance):
+        (class_instance.{{ classname|lower }}_dir / "x.txt").write_text("data")
         target = tmp_path / "clone"
-        {{ classname|lower }}_instance.snapshot(target)
+        class_instance.snapshot(target)
         assert (target / "x.txt").exists()
 
-    def test_copy_to_creates_duplicates(self, tmp_path, {{ classname|lower }}_instance):
-        ({{ classname|lower }}_instance.{{ classname|lower }}_dir / "a.txt").write_text("x")
+    def test_copy_to_creates_duplicates(self, tmp_path, class_instance):
+        (class_instance.{{ classname|lower }}_dir / "a.txt").write_text("x")
         new_dir = tmp_path / "dest"
-        {{ classname|lower }}_instance.copy_to(new_dir)
+        class_instance.copy_to(new_dir)
         assert (new_dir / "a.txt").exists()
 
 # ─── Misc Handling Tests for {{ classname|title }} ──────────────────────────────────────────
 
 class Test{{ classname|title }}Misc:
 
-    def test_to_dict_has_keys(self, {{ classname|lower }}_instance):
-        d = {{ classname|lower }}_instance.to_dict()
+    def test_to_dict_has_keys(self, class_instance):
+        d = class_instance.to_dict()
         assert "path" in d and "id" in d and "items" in d
