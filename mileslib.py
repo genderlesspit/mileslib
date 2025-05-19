@@ -314,26 +314,22 @@ class StaticMethods: # For Internal Use
         return path
 
 class MilesLib:
-    def __init__(self, pdir: str = os.getcwd()):
-        self.sm = StaticMethods()
-        self.pdir = self.sm.validate_instance_directory(pdir)
+    def __init__(self, pdir: Path = os.getcwd()):
+        self.pdir = StaticMethods.validate_instance_directory(pdir)
         self.launch_time = datetime.utcnow()
         self.launch_time_file_name = self.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
-        self.logger = Logger(inst=self)
+
+        self.logger = Logger(pdir=self.pdir, launch_time=self.launch_time_file_name)
 
 class Logger:
-    def __init__(self, inst):
+    def __init__(self, pdir: Path, launch_time: str):
         """
         Logger operates on a passed-in test_Main instance.
         :param inst Argument for instance passed through the classname.
         """
-        self.sm.validate_instance(inst=inst)
-        self.m = inst
-        self.pdir = self.m.pdir
-        self.log_stamp = self.m.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
-
-        self.log_dir = self.sm.validate_directory(self.m.pdir / "logs")
-        self.class_dir = self.log_dir #alt for avoiding refactoring code
+        self.pdir = pdir
+        self.log_stamp = launch_time
+        self.log_dir = StaticMethods.validate_directory(self.pdir / "logs")
         self.log_file_dir = self.create_log_file()
         self.logger = self.setup_structlog_logger(self.log_file_dir)
 
@@ -344,15 +340,17 @@ class Logger:
         self.contents = list(self.pdir.iterdir())
 
     def __getattr__(self, name):
-        if hasattr(self.logger, name):
-            return getattr(self.logger, name)
-        raise AttributeError(f"'Logger' object has no attribute '{name}'")
+        if "logger" in self.__dict__:
+            logger = self.__dict__["logger"]
+            if hasattr(logger, name):
+                return getattr(logger, name)
+        raise AttributeError(f"'MilesLib' object has no attribute '{name}'")
 
     ### Dynamic Methods ###
     def create_log_file(self):
         was_log_file_created = False #yet....
         try:
-            log_file_dir , was_log_file_created = self.sm.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
+            log_file_dir , was_log_file_created = StaticMethods.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
             return Path(log_file_dir)
         except Exception as e:
             raise RuntimeError(f"sm.exists() is broken, could not create {e}") if was_log_file_created is False else None

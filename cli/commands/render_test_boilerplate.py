@@ -1,53 +1,45 @@
 #!/usr/bin/env python3
+import os
 import sys
 from pathlib import Path
-import click
 from jinja2 import Environment, FileSystemLoader
 from mileslib import StaticMethods as sm
+from mileslib import MilesLib
+import click
 
-# point at your repo root so `from staticmethods import …` still works
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
+def render_boilerplate(classname: str, mainname: str = "Main", pdir=None, logger=None):
+    """Render a test file for a given class using a Jinja2 template."""
+    pdir = Path(pdir or os.getcwd)
+    tpl_path = sm.validate_file(pdir / "config" / "_test_boilerplate.j2")
+    out_dir  = pdir / "tests" / ".dev"
+    sm.validate_directory(out_dir)
+
+    env = Environment(loader=FileSystemLoader(str(tpl_path.parent)), autoescape=False)
+    template = env.get_template(tpl_path.name)
+
+    rendered = template.render(classname=classname, mainname=mainname)
+
+    out_file = out_dir / f"test_{classname.lower()}.py"
+    out_file.write_text(rendered, encoding="utf-8")
+
+    if logger:
+        logger.info("Test boilerplate created", extra={"class_name": classname, "path": str(out_file)})
+
+    click.echo(f"✅ Created: {out_file}")
 
 @click.command(context_settings={"ignore_unknown_options": True})
-@click.argument("classname", metavar="classname")
+@click.argument("classname")
 @click.option(
     "--mainname",
     default="PlaceholderMain",
     show_default=True,
     help="Optional name for the main class (used for {{ mainname }})",
 )
-def run(classname: str, mainname: str = "Main"):
-    """
-    CLI to render a Python boilerplate class from a Jinja2 template into tests/.dev/.
-
-    Usage:
-      python tests/render_test_boilerplate.py MyClassName --mainname PlaceholderMain
-
-    This renders:
-      {pdir}/tests/_test_boilerplate.j2  →  {pdir}/tests/.dev/test_<classname>.py
-    """
-    # --- exactly your original paths: ---
-    pdir = ROOT
-    tpl_path = sm.validate_file(pdir / "config" / "_test_boilerplate.j2")
-    out_dir  = pdir / "tests" / ".dev"
-    sm.validate_directory(out_dir)
-
-    # set up Jinja2 the “correct” way
-    env = Environment(
-        loader=FileSystemLoader(str(tpl_path.parent)),
-        autoescape=False,  # no HTML auto-escaping for Python code
-    )
-    template = env.get_template(tpl_path.name)
-
-    rendered = template.render(
-        classname=classname,
-        mainname=mainname,
-    )
-
-    out_file = out_dir / f"test_{classname.lower()}.py"
-    out_file.write_text(rendered, encoding="utf-8")
-    click.echo(f"✅ Created: {out_file}")
+@click.pass_context
+def run(ctx, classname: str, mainname: str):
+    """CLI wrapper for test boilerplate rendering."""
+    miles = ctx.obj.get("miles")
+    render_boilerplate(pdir=miles.pdir, classname=classname, mainname=mainname, logger=miles.logger if miles else None)
 
 if __name__ == "__main__":
     run()
