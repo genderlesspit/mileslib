@@ -1,0 +1,32 @@
+# --- ENVIRONMENT ---
+.env
+*.env
+*.env.*
+
+# --- PYTHON ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.pdb
+
+# --- VENV ---
+.venv/
+venv/
+ENV/
+
+# --- DJANGO ---
+*.sqlite3
+db.sqlite3
+/media/
+staticfiles/
+*.log
+
+# --- PYCHARM / VSCODE ---
+.idea/
+.vscode/
+
+# --- OS FILES ---
+.DS_Store
+Thumbs.db
