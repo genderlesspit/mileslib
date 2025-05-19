@@ -54,6 +54,8 @@ ml = MilesLib()
 ml.logger.info("Logger is working")
 ```
 
+
+
 ---
 
 ## Example Log Output
@@ -71,9 +73,100 @@ ml.logger.info("Logger is working")
 }
 ```
 
+Here’s a clean, markdown-ready documentation section you can paste into your `README.md`:
+
 ---
 
-# 📖 Sprint Plan: MilesLib + PhazeDeck
+## `generate-cli` — CLI Boilerplate Generator
+
+This command creates a new Click CLI command + pytest test using Jinja2 templates.
+
+### Output Files
+
+It generates two files in `tests/.dev/cli/`:
+
+* `cli_<command_name>.py` — the actual CLI command
+* `test_cli_<command_name>.py` — the pytest test for it
+
+---
+
+### Usage
+
+```bash
+python -m mileslib generate-cli <command_name> [args...] --opt <opt1> --opt <opt2> ...
+```
+
+### Arguments
+
+| Name           | Type    | Description                    |
+| -------------- | ------- | ------------------------------ |
+| `command_name` | `str`   | Name of the CLI command        |
+| `args...`      | `str[]` | Positional arguments to accept |
+
+---
+
+### Options
+
+```bash
+--opt "name:type:default:help"
+--docstring "Some description"
+```
+
+Each `--opt` flag must follow this format:
+
+```
+name:type:default:help
+```
+
+For example:
+
+```bash
+--opt force:bool:True:"Force deploy"
+--opt retries:int:3:"Retry attempts"
+```
+
+---
+
+### ✅ Example
+
+```bash
+python -m mileslib generate-cli deploy region env --opt force:bool:True:"Force deploy" --opt retries:int:3:"Retry attempts"
+```
+
+Generates:
+
+* `tests/.dev/cli_deploy.py`:
+
+  ```python
+  @click.command()
+  @click.option("--force", is_flag=True, default=True, help="Force deploy")
+  @click.option("--retries", type=int, default=3, help="Retry attempts")
+  @click.argument("region")
+  @click.argument("env")
+  def deploy(...): ...
+  ```
+
+* `tests/.dev/test_cli_deploy.py`:
+
+  ```python
+  def test_deploy_invokes():
+      runner = CliRunner()
+      result = runner.invoke(deploy, ["test_region", "test_env", "--force", "True", "--retries", "3"])
+      assert result.exit_code == 0
+  ```
+
+---
+
+### Template Location
+
+| Template file | Path                              |
+| ------------- | --------------------------------- |
+| CLI Jinja2    | `config/_cli_command_template.j2` |
+| Test Jinja2   | `config/_test_cli_template.j2`    |
+
+---
+
+# Sprint Plan: MilesLib + PhazeDeck
 
 ---
 
@@ -298,98 +391,128 @@ ml.logger.info("Logger is working")
 
 # Sprint 2 (Week 2): Project Scaffolding CLI
 
-## Weekly Objective
+## Key Goal:
 
-Build a CLI-driven scaffolding engine using `mileslib init` that generates a backend project based on FastAPI or Django with PostgreSQL, .env injection, and Azure-ready deployment files.
+MilesLib `init` should generate a deploy-ready project skeleton with:
+
+* Django (admin/auth)
+* FastAPI (REST/async)
+* PostgreSQL config
+* Shared config/logging
+* Azure deploy files (Docker, az webapp, secrets)
+* Optional Redis + Celery setup
 
 ---
 
-## Day-by-Day Breakdown
+### Command
 
-### Day 1 (Monday): Scaffold Planning + CLI Interface
+```bash
+mileslib init project-name --stack azure-hybrid
+```
 
-**Goal:** Define CLI UX and stub out subcommands.
+### It Auto-Generates:
 
-**Tasks:**
+#### 1. Folder Structure
 
-* Finalize `mileslib init` syntax and CLI help text
-* Add `--stack` flag with options: `django`, `fastapi`, `azure-hybrid`
-* Create `cli.main:init()` with logging and `click.pass_context`
-* Stub `scaffold/project_init.py:run_init()` with print/log output
+```
+project-name/
+├── django_app/
+│   ├── manage.py
+│   ├── settings.py
+│   └── urls.py
+├── fastapi_app/
+│   ├── main.py
+│   └── routes/
+│       └── test.py
+├── shared/
+│   ├── mileslib/  (symlink or package import)
+│   └── config.json
+├── docker/
+│   ├── django.Dockerfile
+│   ├── fastapi.Dockerfile
+│   └── compose.yml
+├── deploy/
+│   ├── azure_frontdoor.tf
+│   └── appservice_config.json
+└── README.md
+```
+
+#### 2. Included Modules
+
+| Module     | Tool                                     | Notes                                    |
+| ---------- | ---------------------------------------- | ---------------------------------------- |
+| Django     | Admin panel + Azure AD login scaffold    | Uses `django-auth-adfs`                  |
+| FastAPI    | Async job API + WebSocket                | Uses `fastapi`, `uvicorn`, `python-jose` |
+| PostgreSQL | Common DB schema + env config            | Optional: init migration                 |
+| Auth       | Shared Azure AD tokens across both apps  | Uses `msal`, `authlib`                   |
+| MilesLib   | Logging, config, utilities               | Imported in both Django + FastAPI        |
+| Deploy     | Docker + Terraform + Azure CLI templates | App Service + PostgreSQL + Front Door    |
+
+---
+
+## Sprint 2: 5-Day Breakdown
+
+### Day 1 (Monday): CLI Interface & Command Logic
+
+**Goal:** Define the `mileslib init` CLI UX and wire up `--stack` support.
+
+* Define CLI signature: `mileslib init <name> --stack <stack>`
+* Add stack flag: `fastapi`, `django`, `azure-hybrid`
+* Wire `cli.main:init()` and `scaffold/project_init.py`
 * Log CLI activity to shared logger
 
-**Checkpoint:** `mileslib init testproject --stack fastapi` prints expected messages
+**Checkpoint:** Prints scaffold info for `--stack fastapi`
 
 ---
 
-### Day 2 (Tuesday): Template System + FastAPI Bootstrap
+### Day 2 (Tuesday): Template Engine + FastAPI Bootstrap
 
-**Goal:** Lay foundation for a template system and render FastAPI.
+**Goal:** Render FastAPI templates and create reusable template system.
 
-**Tasks:**
+* Create `templates/hybrid/fastapi/`
+* Implement `render_folder(template_dir, dest_dir, context)`
+* Generate `.env`, `Dockerfile`, `main.py`, `routes.py`, `requirements.txt`
+* Confirm `uvicorn main:app` boots correctly
 
-* Create `templates/fastapi/` directory
-* Write `render_folder(template_dir, dest_dir, context)` logic using Jinja2
-* Add `.env`, `Dockerfile`, `README.md` placeholders
-* Generate `main.py`, `app/`, and `requirements.txt` with async route
-* Log completed scaffolds to CLI output and logger
-
-**Checkpoint:** Local FastAPI app bootable from CLI-generated folder
+**Checkpoint:** FastAPI app boots from generated folder
 
 ---
 
-### Day 3 (Wednesday): Django Stack Integration
+### Day 3 (Wednesday): Django Scaffold + AAD Auth Stub
 
-**Goal:** Enable Django template generation with optional AAD support.
+**Goal:** Scaffold Django project with optional Azure AD login.
 
-**Tasks:**
+* Create `templates/hybrid/django/`
+* Generate `manage.py`, `settings.py`, `urls.py`, `wsgi.py`
+* Add AAD login block via `django-auth-adfs` (toggleable)
+* Reuse shared `.env` format
 
-* Create `templates/django/` with base project
-* Add `manage.py`, `settings.py`, and `wsgi.py`
-* Inject optional AAD logic via `django-auth-adfs`
-* Unify `.env` layout with FastAPI
-* Validate project is bootable with SQLite or local PostgreSQL
-
-**Checkpoint:** Both Django and FastAPI can be generated from CLI with `--stack`
+**Checkpoint:** Django admin boots and integrates optional AAD
 
 ---
 
-### Day 4 (Thursday): PostgreSQL Config + Shared Env
+### Day 4 (Thursday): Shared Env + PostgreSQL + MilesLib Core
 
-**Goal:** Enable stack-neutral .env and PostgreSQL configuration.
+**Goal:** Unify environment handling and database connectivity.
 
-**Tasks:**
+* Generate `shared/config.json`, `shared/mileslib/`
+* Scaffold `.env` with `DATABASE_URL`, `SECRET_KEY`, `ENV`
+* Add Docker config for PostgreSQL
+* Create `env_util.py` to load/validate env vars
+* Confirm DB connection works across both apps
 
-* Add `DATABASE_URL` and `SECRET_KEY` to `.env`
-* Inject `python-dotenv` or `os.environ` loading logic
-* Add Dockerfile for PostgreSQL in both stacks
-* Add `mileslib.scaffold.env_util` to parse, validate, and inject envs
-* Confirm apps run with `.env` settings via `uvicorn` or `runserver`
-
-**Checkpoint:** CLI-generated apps connect to PostgreSQL using `.env`
+**Checkpoint:** Apps connect to shared PostgreSQL via `.env`
 
 ---
 
-### Day 5 (Friday): Docs, Tests, Final Polish
+### Day 5 (Friday): Tests, Docs, Optional Extras
 
-**Goal:** Polish CLI UX and wrap test + doc coverage.
+**Goal:** Polish UX, support optional Redis/Celery, finalize docs/tests.
 
-**Tasks:**
+* Add `--extras redis,celery` toggle
+* Generate `celery.py`, `redis.py`, background route stubs
+* Add pytest tests for CLI generation
+* Validate re-run behavior (idempotent)
+* Document full stack in README + usage examples
 
-* Add CLI usage examples to README
-* Write tests for CLI commands with `CliRunner`
-* Validate idempotency (re-run into existing dir = handled gracefully)
-* Confirm `--stack` logic triggers correct template
-* Finish test coverage and push results to HTML
-
-**Checkpoint:** CLI, templates, and .env logic fully covered and documented
-
----
-
-## Deliverables by End of Week
-
-* `mileslib init <name> --stack <stack>` CLI tool
-* Template engine supporting Django and FastAPI
-* PostgreSQL and .env config for local/remote
-* Project logs on CLI usage
-* Dev-ready backend generated with one command
+**Checkpoint:** `mileslib init <name> --stack azure-hybrid --extras redis,celery` generates fully bootable backend

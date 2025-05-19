@@ -462,7 +462,7 @@ def temp_logger(tmp_path):
 @pytest.fixture
 def temp_log_file(tmp_path: Path):
     """Provide a temporary log file path."""
-    return tmp_path / "logs" / "app.log"
+    return tmp_path / "logs" / "backend.log"
 
 ### Special Method Tests ###
 

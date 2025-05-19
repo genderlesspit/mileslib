@@ -1,0 +1,76 @@
+{# Jinja2 Template for CLI Command with Inline Tests #}
+import click
+from click.testing import CliRunner
+import pytest
+
+@click.command()
+{% for arg in args %}@click.argument("{{ arg }}")
+{% endfor %}{% for opt in options %}@click.option("--{{ opt.name }}",
+    {% if opt.type == 'bool' %}is_flag=True,{% else %}type={{ opt.type }},{% endif %}
+    default={{ opt.default }},
+    help="{{ opt.help }}")
+{% endfor %}
+@click.pass_context
+def {{ command_name }}(ctx, {% for arg in args %}{{ arg }}, {% endfor %}{% for opt in options %}{{ opt.name }}{% if not loop.last %}, {% endif %}{% endfor %}):
+    """
+    {{ docstring }}
+    """
+    {% if 'fail' in option_names %}if fail:
+        raise click.ClickException("Intentional failure")
+    {% endif %}
+    {% if 'verbose' in option_names %}if verbose:
+        click.echo("[verbose] {{ command_name }} started")
+        click.echo(f"{{ ', '.join(args + option_names) }}")
+    {% endif %}
+    {% if 'dry_run' in option_names %}if dry_run:
+        click.echo("[dry-run] No changes made.")
+        return
+    {% endif %}
+    click.echo("{{ command_name }} called")
+
+# --- Inline test suite ---
+
+def test_{{ command_name }}_invokes():
+    runner = CliRunner()
+    result = runner.invoke({{ command_name }}, [
+        {% for arg in args %}"test_{{ arg }}",
+        {% endfor %}{% for opt in options %}
+        {% if opt.type == 'bool' %}"--{{ opt.name }}",
+        {% else %}"--{{ opt.name }}", "{{ opt.default }}",
+        {% endif %}{% endfor %}])
+    assert result.exit_code == 0
+    assert "{{ command_name }} called" in result.output
+
+def test_{{ command_name }}_shows_help():
+    runner = CliRunner()
+    result = runner.invoke({{ command_name }}, ["--help"])
+    assert result.exit_code == 0
+    assert "Usage" in result.output
+    assert {{ command_name }}.__doc__.strip()[:10] in result.output
+
+def test_{{ command_name }}_missing_required_argument():
+    runner = CliRunner()
+    result = runner.invoke({{ command_name }}, [])
+    assert result.exit_code != 0
+    assert "Missing argument" in result.output
+
+{% if 'dry_run' in option_names %}def test_{{ command_name }}_dry_run():
+    runner = CliRunner()
+    result = runner.invoke({{ command_name }}, [{% for arg in args %}"x", {% endfor %}"--dry-run"])
+    assert result.exit_code == 0
+    assert "[dry-run]" in result.output
+{% endif %}
+
+{% if 'fail' in option_names %}def test_{{ command_name }}_intentional_failure():
+    runner = CliRunner()
+    result = runner.invoke({{ command_name }}, [{% for arg in args %}"x", {% endfor %}"--fail"])
+    assert result.exit_code != 0
+    assert "Intentional failure" in result.output
+{% endif %}
+
+{% if 'verbose' in option_names %}def test_{{ command_name }}_flag_behavior():
+    runner = CliRunner()
+    result = runner.invoke({{ command_name }}, [{% for arg in args %}"x", {% endfor %}"--verbose"])
+    assert result.exit_code == 0
+    assert "[verbose]" in result.output
+{% endif %}

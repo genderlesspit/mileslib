@@ -1,0 +1,54 @@
+Key Goal:
+MilesLib init should generate a deploy-ready project skeleton with:
+
+Django (admin/auth)
+
+FastAPI (REST/async)
+
+PostgreSQL config
+
+Shared config/logging
+
+Azure deploy files (Docker, az webapp, secrets)
+
+Optional Redis + Celery setup
+
+Updated MilesLib Vision: Project Bootstrap CLI
+Command
+bash
+Copy
+Edit
+mileslib init project-name --stack azure-hybrid
+It Auto-Generates:
+1. Folder Structure
+pgsql
+Copy
+Edit
+project-name/
+├── django_app/
+│   ├── manage.py
+│   ├── settings.py
+│   └── urls.py
+├── fastapi_app/
+│   ├── main.py
+│   └── routes/
+│       └── test.py
+├── shared/
+│   ├── mileslib/  (symlink or package import)
+│   └── config.json
+├── docker/
+│   ├── django.Dockerfile
+│   ├── fastapi.Dockerfile
+│   └── compose.yml
+├── deploy/
+│   ├── azure_frontdoor.tf
+│   └── appservice_config.json
+└── README.md
+2. Included Modules
+Module	Tool	Notes
+Django	Admin panel + Azure AD login scaffold	Uses django-auth-adfs
+FastAPI	Async job API + WebSocket	Uses fastapi, uvicorn, python-jose
+PostgreSQL	Common DB schema + env config	Optional: init migration
+Auth	Shared Azure AD tokens across both apps	Uses msal, authlib
+MilesLib	Imported in both Django + FastAPI	Logging, config, utilities
+Deploy	Docker + Terraform + Azure CLI templates	App Service + PostgreSQL + Front Door
