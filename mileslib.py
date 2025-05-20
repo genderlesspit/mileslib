@@ -125,6 +125,30 @@ class StaticMethods: # For Internal Use
             return False
 
     @staticmethod
+    def try_import(pack: str):
+        """
+        Attempt to import a package by name. Installs it if missing, then retries.
+
+        Args:
+            pack (str): Name of the package to import (e.g. "structlog")
+
+        Returns:
+            module: The imported module object
+
+        Raises:
+            RuntimeError: If the module cannot be imported after install attempts.
+        """
+        try:
+            return importlib.import_module(pack)
+        except ImportError:
+            StaticMethods.dependency(pack)
+            try:
+                return StaticMethods.recall(lambda: importlib.import_module(pack), max_attempts=3,
+                                 handled_exceptions=(ImportError,))
+            except ImportError as e:
+                raise RuntimeError(f"{pack} could not be properly loaded after installation.") from e
+
+    @staticmethod
     def timer(label="operation"):
         """
         Decorator to log the duration of a function.
@@ -313,135 +337,75 @@ class StaticMethods: # For Internal Use
 
         return path
 
+sm = StaticMethods
+
 class MilesLib:
     def __init__(self, pdir: Path = os.getcwd()):
-        self.pdir = StaticMethods.validate_instance_directory(pdir)
+        self.pdir = sm.validate_instance_directory(pdir)
         self.launch_time = datetime.utcnow()
         self.launch_time_file_name = self.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
 
-        self.logger = Logger(pdir=self.pdir, launch_time=self.launch_time_file_name)
-
-class Logger:
-    def __init__(self, pdir: Path, launch_time: str):
-        """
-        Logger operates on a passed-in test_Main instance.
-        :param inst Argument for instance passed through the classname.
-        """
-        self.pdir = pdir
-        self.log_stamp = launch_time
-        self.log_dir = StaticMethods.validate_directory(self.pdir / "logs")
-        self.log_file_dir = self.create_log_file()
-        self.logger = self.setup_structlog_logger(self.log_file_dir)
-
-        #ID
-        self._id = self.pdir.name
-
-        #Contents
-        self.contents = list(self.pdir.iterdir())
-
-    def __getattr__(self, name):
-        if "logger" in self.__dict__:
-            logger = self.__dict__["logger"]
-            if hasattr(logger, name):
-                return getattr(logger, name)
-        raise AttributeError(f"'MilesLib' object has no attribute '{name}'")
-
-    ### Dynamic Methods ###
-    def create_log_file(self):
-        was_log_file_created = False #yet....
-        try:
-            log_file_dir , was_log_file_created = StaticMethods.exists(path=Path(self.log_dir / f"{self.log_stamp}.log"),create_if_missing=True)
-            return Path(log_file_dir)
-        except Exception as e:
-            raise RuntimeError(f"sm.exists() is broken, could not create {e}") if was_log_file_created is False else None
-
-    ### Logger Methods ###
-    @classmethod
-    def class_method(cls):
-        """
-        Placeholder classname method.
-        - Uses classname reference (`cls`)
-        """
-        return cls.__name__
-
-    ### Static Methods ###
-    @staticmethod
-    def close_handlers() -> None:
-        """
-        Close all logging handlers associated with this logger.
-        Useful for cleanup in tests or before deleting log files.
-        """
-        root_logger = logging.getLogger()
-        for handler in root_logger.handlers:
-            try:
-                handler.flush()
-                handler.close()
-            except Exception:
-                pass
-        root_logger.handlers.clear()
+class MilesLogger:
+    _configured = False
+    _current_log_path = None
+    _logger = None
 
     @staticmethod
-    def setup_structlog_logger(log_path: Path):
-        """
-        Configure a structlog-based logger with file rotation and JSON output.
+    def try_import_loguru():
+        loguru = sm.try_import("loguru")
+        return loguru.logger
 
-        Attempts to import structlog, installing it if necessary. Uses StaticMethods.recall
-        to retry import after installation. Sets up both console and file handlers.
+    @staticmethod
+    def get_loguru():
+        if not MilesLogger._configured:
+            raise RuntimeError("Logger has not been initialized. Call init_logger() first.")
+        return MilesLogger.try_import_loguru()
 
-        Args:
-            log_path (Path): The target path for log file output.
+    @staticmethod
+    def init_logger(
+        log_dir: Path = Path("logs"),
+        label: str = None,
+        serialize: bool = True,
+        pretty_console: bool = True,
+        level: str = "INFO",
+    ):
+        loguru = MilesLogger.try_import_loguru()
 
-        Returns:
-            BoundLogger: A configured structlog logger instance.
-        """
+        if MilesLogger._configured:
+            return loguru
 
-        def import_structlog():
-            return __import__("structlog")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+        label = f"_{label}" if label else ""
+        log_path = log_dir / f"{timestamp}{label}.log"
 
-        # Try importing structlog, install if missing, retry using recall
-        try:
-            structlog = import_structlog()
-        except ImportError:
-            StaticMethods.dependency("structlog")
-            try:
-                structlog = StaticMethods.recall(import_structlog, max_attempts=3, handled_exceptions=(ImportError,))
-            except ImportError as e:
-                raise RuntimeError("structlog could not be properly loaded after installation.") from e
+        if pretty_console:
+            loguru.add(sys.stderr, level=level, enqueue=True)
 
-        # Prepare log directory
-        log_path.parent.mkdir(parents=True, exist_ok=True)
+        loguru.add(log_path, level=level, serialize=serialize, rotation="10 MB", enqueue=True)
 
-        # Set up file and console handlers
-        handlers = [
-            RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=5),
-            logging.StreamHandler()
-        ]
+        MilesLogger._logger = loguru  # ← Add this line
+        MilesLogger._current_log_path = log_path
+        MilesLogger._configured = True
+        return loguru
 
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.INFO)
-        root_logger.handlers.clear()  # critical!
-        for h in handlers:
-            root_logger.addHandler(h)
+    @staticmethod
+    def get_logger():
+        if not MilesLogger._configured:
+            return MilesLogger.init_logger()
+        return MilesLogger._logger
 
-        # Configure structlog
-        structlog.configure(
-            processors=[
-                structlog.processors.TimeStamper(fmt="iso"),
-                structlog.processors.JSONRenderer(),
-            ],
-            wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
-            logger_factory=structlog.stdlib.LoggerFactory(),
-            cache_logger_on_first_use=True,
-        )
+    @staticmethod
+    def reset_logger():
+        loguru = MilesLogger.try_import_loguru()
+        loguru.remove()
+        MilesLogger._current_log_path = None
+        MilesLogger._configured = False
+        MilesLogger._logger = None
 
-        return structlog.get_logger()
-
-    def refresh(self) -> None:
-        """
-        Reload the contents from disk.
-        Use after files have changed outside the object context.
-        """
-        self.contents = list(self.class_dir.iterdir())
+log = MilesLogger.get_logger()
+log_path = MilesLogger._current_log_path
+log_exists = MilesLogger._configured
 
 class Config:
     def __init__(self, inst):
@@ -465,8 +429,8 @@ class Config:
             build: Path = StaticMethods.validate_file(file)
             return build
         else:
-            build: Path = StaticMethods.ensure_file_with_default("config/config.json",
-                                                        default={"app_name": "MilesApp", "version": "1.0"})
+            build: Path = StaticMethods.ensure_file_with_default("tests/.dev/config/config.json",
+                                                                 default={"app_name": "MilesApp", "version": "1.0"})
             return build
 
     def get(self, *args: str | list | tuple):
@@ -477,8 +441,8 @@ class Config:
 
         def load_and_traverse():
             if os.stat(file).st_size == 0:
-                StaticMethods.ensure_file_with_default("config/config.json",
-                                                        default={"app_name": "MilesApp", "version": "1.0"})
+                StaticMethods.ensure_file_with_default("tests/.dev/config/config.json",
+                                                       default={"app_name": "MilesApp", "version": "1.0"})
             with open(file, "r", encoding="utf-8") as f:
                 config_data = json.load(f)
 

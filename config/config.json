@@ -1,4 +1,5 @@
 {
+    "valid": true
     "setup_complete": true,
     "local_version": "0.0.1",
     "repo_url": "https://raw.githubusercontent.com/genderlesspit/phazedeck/master",
@@ -21,9 +22,53 @@
             "pack": "hashlib"
         }
     },
-    "directories": {
-        "folder": "C:\\Users\\miles\\PycharmProjects\\ColdEmailer",
-        "logs":"logs",
-        "code.json": "config\\code_template.json"
+    "paths": {
+        "log_dir": "logs/",
+        "data_dir": "data/",
+        "env_file": ".env"
+    },
+    "profile": "development",
+    "env_overrides": {
+      "production": {
+        "DEBUG": false,
+        "ALLOWED_HOSTS": ["yourdomain.com"]
+      }
+    },
+    "env": {
+        "DEBUG": true,
+        "SECRET_KEY": "changeme",
+
+        "POSTGRES_DB": "mileslib",
+        "POSTGRES_USER": "postgres",
+        "POSTGRES_PASSWORD": "changeme",
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5432",
+
+        "DJANGO_CLIENT_ID": "changeme",
+        "DJANGO_CLIENT_SECRET": "changeme",
+        "DJANGO_TENANT_ID": "changeme",
+        "DJANGO_REDIRECT_URI": "http://localhost:8000/oauth2/callback"
+    },
+    "required": [
+        "SECRET_KEY",
+        "POSTGRES_DB",
+        "POSTGRES_USER",
+        "POSTGRES_PASSWORD",
+        "DJANGO_CLIENT_ID",
+        "DJANGO_CLIENT_SECRET",
+        "DJANGO_TENANT_ID"
+    ],
+    "denylist": [
+        "changeme",
+        ""
+    ],
+    "defaults": {
+        "LOG_LEVEL": "INFO",
+        "ALLOWED_HOSTS": ["*"]
+    },
+    "meta": {
+        "version": "1.0",
+        "project": "MilesLib API",
+        "description": "Configuration for Django + Azure AD + PostgreSQL."
     }
 }
