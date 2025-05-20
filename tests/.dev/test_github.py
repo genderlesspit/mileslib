@@ -158,3 +158,135 @@ class Github:
         except Exception as cannot_get:
             self.m.log.warning(f"Failed to retrieve file from {full_url}: {cannot_get}")
             return None
+
+        class Github:
+            @staticmethod
+            def get_file(
+                    mileslib,
+                    *path_parts: str,
+                    repo_url: str,
+                    dest_dir: Path,
+                    as_text: bool = True,
+                    save_as: str = None,
+                    token: str = None,
+                    quiet: bool = False,
+                    no_save: bool = False,
+            ) -> str | bytes | None:
+                """
+                Fetch a file from GitHub and optionally save it locally.
+
+                Args:
+                    mileslib: MilesLib instance for logging and requests
+                    path_parts: Path components (e.g., "config", "config.json")
+                    repo_url: Base GitHub URL
+                    dest_dir: Where to save the file (default: assembled from path_parts)
+                    as_text: Return as string if True, else bytes
+                    save_as: Optional name to save as
+                    token: GitHub access token (optional)
+                    quiet: Suppress logging
+                    no_save: If True, return content without writing to disk
+
+                Returns:
+                    Content as str or bytes if `no_save` is True, otherwise saved content
+                """
+                full_url = "/".join([repo_url.rstrip("/")] + [p.strip("/") for p in path_parts])
+                local_path = dest_dir / (save_as or os.path.join(*path_parts))
+
+                headers = {"Authorization": f"token {token}"} if token else {}
+
+                try:
+                    content = mileslib.request(full_url, headers=headers, as_text=as_text,
+                                               message="Downloading from GitHub")
+                    if content is None:
+                        return None
+
+                    if no_save:
+                        return content
+
+                    # Save to disk
+                    os.makedirs(local_path.parent, exist_ok=True)
+                    mode = "w" if as_text else "wb"
+                    with open(local_path, mode, encoding="utf-8" if as_text else None) as f:
+                        f.write(content)
+                    mileslib.log.info(f"Saved GitHub file to {local_path}")
+                    return content
+
+                except Exception as e:
+                    mileslib.log.warning(f"Failed to retrieve from GitHub: {e}")
+                    return None
+
+            @staticmethod
+            def get_remote_config(mileslib, repo_url: str, token: str = None) -> dict:
+                """
+                Fetch remote config.json from GitHub and parse as JSON.
+
+                Returns:
+                    Parsed JSON dictionary
+                """
+                raw = StaticMethods.Github.get_file(
+                    mileslib,
+                    "config", "config.json",
+                    repo_url=repo_url,
+                    dest_dir=Path(mileslib.pdir) / "config",
+                    as_text=True,
+                    token=token,
+                    no_save=True
+                )
+                try:
+                    return json.loads(raw)
+                except Exception as e:
+                    mileslib.crash(f"Could not load remote config.json: {e}")
+                    return {}
+
+            @staticmethod
+            def check_version_update(local_version: str, remote_version: str, mileslib=None) -> bool:
+                """
+                Compare two versions using PEP 440 rules.
+
+                Returns:
+                    True if remote_version is newer than local_version
+                """
+                if mileslib:
+                    mileslib.log.info(f"Comparing local {local_version} vs remote {remote_version}")
+                return version.parse(remote_version) > version.parse(local_version)
+
+            @staticmethod
+            def install_full_update(mileslib, repo_url: str, dest_dir: Path, token: str = None):
+                """
+                Downloads and extracts the full repo into `dest_dir`.
+                """
+                zip_url = repo_url.replace("raw.githubusercontent.com", "github.com").replace(
+                    "/master", "/archive/refs/heads/master.zip"
+                )
+                headers = {"Authorization": f"token {token}"} if token else {}
+
+                try:
+                    mileslib.close_log()
+                    response = requests.get(zip_url, headers=headers, stream=True)
+                    response.raise_for_status()
+
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        zip_path = Path(tmpdir) / "repo.zip"
+                        with open(zip_path, "wb") as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+
+                        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                            zip_ref.extractall(tmpdir)
+
+                        repo_root = next(Path(tmpdir).glob("*/"))
+                        for item in repo_root.iterdir():
+                            target = dest_dir / item.name
+                            if item.is_dir():
+                                if target.exists():
+                                    shutil.rmtree(target)
+                                shutil.copytree(item, target)
+                            else:
+                                shutil.copy2(item, target)
+
+                    mileslib.open_log()
+                    mileslib.log.info("✅ GitHub update complete. Restarting...")
+                    mileslib.restart()
+
+                except Exception as e:
+                    mileslib.crash(f"Update failed: {e}")
