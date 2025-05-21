@@ -1,470 +1,971 @@
-from typing import Any, List, Union, Mapping, Sequence, Callable, Tuple, Type
+import shutil
+from unittest import mock
+import pytest
+import importlib.util
+import requests
+import toml
+from typing import Any, List, Union, Mapping, Sequence, Callable, Tuple, Type, Optional
+from types import ModuleType
 import json
 import importlib.util
 import subprocess
 import time
-from typing import Iterator
-import logging
 from pathlib import Path
 import sys
-from logging.handlers import RotatingFileHandler
 import os
+import tempfile
+import zipfile
 from datetime import datetime
+from dynaconf import Dynaconf
 
-class StaticMethods: # For Internal Use
-    @staticmethod
-    def attempt(
-            fn,
-            *args,
-            retries: int = 3,
-            backoff_base: int = 2,
-            **kwargs
-    ):
-        """
-        Retry `fn(*args, **kwargs)` up to `retries` times with exponential backoff.
-        Raises the last exception if all attempts fail.
-        """
 
-        for attempt in range(1, retries + 1):
+class StaticMethods:
+    class Dependencies:
+        @staticmethod
+        def _dependency(dep: str, pack: str = None) -> bool:
+            """
+            Ensure a Python module is installed; install via pip if not.
+
+            Args:
+                dep (str): The name of the importable module.
+                pack (str): Optional pip package name (if different from import name).
+
+            Returns:
+                bool: True if installed or already present, False if installation failed.
+            """
             try:
-                return fn(*args, **kwargs)
-
-            except Exception as e:
-                last_exception = e
-                print("Attempt failed")
-                if attempt < retries:
-                    delay = backoff_base ** (attempt - 1)
-                    print("Backing off before retry")
-                    time.sleep(delay)
-
-        # all retries exhausted
-        print("All attempts exhausted ... ")
-        # re-raise last exception
-        raise last_exception
-
-    @staticmethod
-    def check_input(arg: Any, expected: Union[Type, Tuple[Type, ...]], label: str = "Input") -> None:
-        """
-        Verifies that the input matches the expected type(s). Raises TypeError if not.
-
-        Args:
-            arg (Any): The argument to check.
-            expected (Type or tuple of Types): The expected type(s) (e.g., str, dict, int).
-            label (str): Optional label for error clarity (e.g., function or variable name).
-
-        Raises:
-            TypeError: If the argument does not match any of the expected types.
-        """
-        if not isinstance(arg, expected):
-            exp_types = (
-                expected.__name__
-                if isinstance(expected, type)
-                else ", ".join(t.__name__ for t in expected)
-            )
-            raise TypeError(f"{label} must be of type {exp_types}, but got {type(arg).__name__}.")
-
-    @staticmethod
-    def restart(self):
-        print("Restarting application...")
-        python = sys.executable
-        os.execv(python, [python] + sys.argv)
-
-    @staticmethod
-    def exists(path: Path,
-               disp: str = None,
-               quiet: bool = False,
-               create_if_missing: bool = False
-               ) -> tuple[Path, bool]:
-        """
-        Check if the given Path exists. Optionally create it if missing.
-
-        Args:
-            path (Path): The file or directory to check.
-            disp (str): Optional display label for logging.
-            quiet (bool): If True, suppress log output.
-            create_if_missing (bool): Create file or directory if not found.
-
-        Returns:
-            tuple[Path, bool]: The Path and whether it exists (or was created).
-        """
-        path = Path(path)
-
-        if path.exists():
-            if not quiet:
-                print(f"{disp or 'Path'} initialized at {path}.")
-            return path, True
-
-        if create_if_missing:
-            try:
-                if path.suffix:  # assume it's a file
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("")
-                    print(f"File created: {path}")
-                else:  # assume it's a directory
-                    path.mkdir(parents=True, exist_ok=True)
-                    print(f"Directory created: {path}")
-                return path, True
-            except Exception as e:
-                print(f"Failed to create {disp or 'path'}: {e}")
-                return path, False
-
-        if not quiet:
-            print(f"{disp or 'Path'} not found at {path}!")
-        return path, False
-
-    @staticmethod
-    def dependency(dep: str, pack: str = None) -> bool:
-        """Ensure a Python module is installed; install via pip if not."""
-        try:
-            if importlib.util.find_spec(dep) is None:
+                if importlib.util.find_spec(dep) is not None:
+                    return True
                 subprocess.check_call([sys.executable, "-m", "pip", "install", pack or dep])
                 return True
-            else:
-                return True
-        except Exception as e:
-            return False
-
-    @staticmethod
-    def try_import(pack: str):
-        """
-        Attempt to import a package by name. Installs it if missing, then retries.
-
-        Args:
-            pack (str): Name of the package to import (e.g. "structlog")
-
-        Returns:
-            module: The imported module object
-
-        Raises:
-            RuntimeError: If the module cannot be imported after install attempts.
-        """
-        try:
-            return importlib.import_module(pack)
-        except ImportError:
-            StaticMethods.dependency(pack)
-            try:
-                return StaticMethods.recall(lambda: importlib.import_module(pack), max_attempts=3,
-                                 handled_exceptions=(ImportError,))
-            except ImportError as e:
-                raise RuntimeError(f"{pack} could not be properly loaded after installation.") from e
-
-    @staticmethod
-    def timer(label="operation"):
-        """
-        Decorator to log the duration of a function.
-
-        Usage:
-            @timer(label="fetch_data")
-            def fetch_data(): ...
-        """
-
-        def decorator(fn):
-            def wrapper(*args, **kwargs):
-                start = time.perf_counter()
-                result = fn(*args, **kwargs)
-                duration = time.perf_counter() - start
-                print(f"{duration:.3f}s")
-                return result
-
-            return wrapper
-
-        return decorator
-
-    @staticmethod
-    def recall(fn: Callable, max_attempts: int = 3,
-               handled_exceptions: Tuple[Type[BaseException]] = (Exception,)) -> Any:
-        """
-        Retry a function up to max_attempts times if handled exceptions occur.
-
-        Args:
-            fn: The function to retry.
-            max_attempts: How many total attempts to make.
-            handled_exceptions: Which exceptions to catch and retry on.
-
-        Returns:
-            The return value of the function, if successful.
-
-        Raises:
-            The last exception encountered, if all retries fail.
-        """
-        attempts = 0
-        while attempts < max_attempts:
-            try:
-                return fn()
-            except handled_exceptions as e:
-                attempts += 1
-                print(f"[Attempt {attempts}/{max_attempts}] Error: {e}")
-                if attempts == max_attempts:
-                    raise
-
-    @staticmethod
-    def traverse_dictionary(data: Any, *keys: Union[str, int], default: Any = None) -> Any:
-        """
-        Traverse nested dictionaries (and optionally lists) using a list of keys/indexes.
-
-        Parameters:
-            data: The initial data structure (dict or list).
-            keys: A list of keys or indexes to access nested values.
-            default: What to return if any key is not found.
-
-        Returns:
-            The final nested value or default if the path doesn't exist.
-        """
-        current = data
-        for key in keys:
-            try:
-                if isinstance(current, Mapping) and key in current:
-                    current = current[key]
-                elif isinstance(current, Sequence) and not isinstance(current, str):
-                    current = current[key]
-                else:
-                    return default
-            except (KeyError, IndexError, TypeError):
-                return default
-        return current
-
-    @staticmethod
-    def validate_instance(inst):
-        """Checks if the incoming instance is valid and not None."""
-        if inst is None:
-            raise RuntimeError("Instance passed to Config is None.")
-        if not hasattr(inst, "__dict__"):
-            raise RuntimeError(f"Invalid instance passed to Config: {type(inst).__name__}")
-
-    @staticmethod
-    def validate_instance_directory(pdir) -> Path:
-        """
-        Ensures the instance has a valid `pdir` path.
-        Accepts string or Path. Returns Path.
-        """
-        if isinstance(pdir, str):
-            pdir = Path(pdir)
-        if not isinstance(pdir, Path):
-            raise TypeError("`.pdir` must be a string or pathlib.Path.")
-        if not pdir.exists():
-            raise FileNotFoundError(f"Directory does not exist: {pdir}")
-        return pdir
-
-    @staticmethod
-    def validate_directory(path: str | Path) -> Path:
-        """
-        Ensures the provided directory exists. Attempts to create it if missing.
-
-        Args:
-            path (str | Path): The path to validate.
-
-        Returns:
-            Path: The validated directory path as a Path object.
-
-        Raises:
-            OSError: If directory creation fails.
-        """
-        path = Path(path)
-        if not path.exists():
-            try:
-                path.mkdir(parents=True, exist_ok=True)
             except Exception as e:
-                raise OSError(f"Failed to create directory '{path}': {e}")
-        elif not path.is_dir():
-            raise NotADirectoryError(f"'{path}' exists but is not a directory.")
-        return path
+                print(f"[Dependency Install Failed] {dep}: {e}")
+                return False
 
+        @staticmethod
+        def try_import(pack: str):
+            """
+            Attempt to import a package by name. Installs it if missing, then retries.
 
-    @staticmethod
-    def validate_file(path: str | Path) -> Path:
-        """
-        Ensures the provided file exists.
+            Args:
+                pack (str): Name of the package to import (e.g. "structlog").
 
-        Args:
-            path (str | Path): The path to the file to check.
+            Returns:
+                module: The imported module object.
 
-        Returns:
-            Path: The validated file path as a Path object.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            IsADirectoryError: If the path exists but is a directory.
-        """
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"File not found: '{path}'")
-        if path.is_dir():
-            raise IsADirectoryError(f"Expected a file but found a directory at: '{path}'")
-        return path
-
-    @staticmethod
-    def ensure_file_with_default(
-            path: str | Path,
-            default: dict | str,
-            encoding: str = "utf-8"
-    ) -> Path:
-        """
-        Ensures a file exists at the given path and has valid content.
-        If the file is missing or empty, it is created/written with default content.
-
-        Args:
-            path (str | Path): Path to the file.
-            default (dict | str): Default content (JSON or text).
-            encoding (str): Encoding to use when writing the file.
-
-        Returns:
-            Path: The Path to the ensured file.
-
-        Raises:
-            TypeError: If default is not dict or str.
-            OSError: If the file can't be created or written to.
-        """
-        path = Path(path)
-
-        should_write = not path.exists() or path.stat().st_size == 0
-
-        if should_write:
+            Raises:
+                RuntimeError: If the module cannot be imported after installation attempts.
+            """
             try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                content = (
-                    json.dumps(default, indent=4)
-                    if isinstance(default, dict)
-                    else default
-                    if isinstance(default, str)
-                    else None
+                return importlib.import_module(pack)
+            except ImportError:
+                success = StaticMethods.Dependencies._dependency(pack)
+                if not success:
+                    raise RuntimeError(f"Failed to install package: {pack}")
+                try:
+                    return StaticMethods.ErrorHandling.recall(
+                        lambda: importlib.import_module(pack),
+                        max_attempts=3,
+                        handled_exceptions=(ImportError,)
+                    )
+                except ImportError as e:
+                    raise RuntimeError(f"{pack} could not be properly loaded after installation.") from e
+
+    try_import = Dependencies.try_import
+    DEPENDENCIES_USAGE = """
+    StaticMethods Dependencies Aliases
+    ----------------------------------
+
+    These functions help manage runtime Python dependencies dynamically:
+
+    try_import(package_name: str) -> Module
+        Attempts to import a module by name. If not installed, tries to install it via pip,
+        then re-imports it with retries.
+
+        Useful for on-demand, self-healing imports in scripts or plugins.
+
+        Example:
+            structlog = try_import("structlog")
+
+    Internally uses:
+        _dependency(dep: str, pack: str = None) -> bool
+            Installs the specified package using pip if not already importable.
+            Can be used for custom install logic (non-aliased).
+    """
+
+    class ErrorHandling:
+        @staticmethod
+        def timer(label="operation"):
+            """
+            Decorator to measure and log the execution duration of a function.
+
+            Args:
+                label (str): A label used in the log output to identify the operation.
+
+            Returns:
+                Callable: A decorator that wraps the function and logs its execution time.
+
+            Example:
+                @ErrorHandling.timer(label="fetch_data")
+                def fetch_data(): ...
+            """
+
+            def decorator(fn):
+                def wrapper(*args, **kwargs):
+                    log = StaticMethods.log
+                    start = time.perf_counter()
+                    result = fn(*args, **kwargs)
+                    duration = time.perf_counter() - start
+                    log.info(f"[{label}] Completed in {duration:.3f}s")
+                    return result
+
+                return wrapper
+
+            return decorator
+
+        # Deprecated
+        @staticmethod
+        def recall(fn: Callable, *args, **kwargs):
+            # simply forward to attempt
+            return StaticMethods.ErrorHandling.attempt(fn, *args, **kwargs)
+
+        @staticmethod
+        def attempt(
+                fn: Callable,
+                *args,
+                retries: int = 3,
+                backoff_base: Optional[int] = None,
+                handled_exceptions: Tuple[Type[BaseException], ...] = (Exception,),
+                label: str = "operation",
+                **kwargs
+        ) -> Any:
+            """
+            Executes a function with retry logic, timing, and structured logging.
+
+            Wraps the function with the `timer` decorator and retries on specified exceptions.
+            Supports optional exponential backoff between attempts.
+
+            Args:
+                fn (Callable): The function to execute.
+                *args: Positional arguments to pass to the function.
+                retries (int): Maximum number of attempts before failing.
+                backoff_base (int, optional): Base for exponential backoff. If None, no delay is applied.
+                handled_exceptions (Tuple[Type[BaseException], ...]): Exceptions to catch and retry.
+                label (str): Descriptive label for logging purposes.
+                **kwargs: Keyword arguments to pass to the function.
+
+            Returns:
+                Any: The result of the function call if successful.
+
+            Raises:
+                BaseException: The last caught exception if all attempts fail.
+            """
+            log = StaticMethods.log
+            timed_fn = StaticMethods.ErrorHandling.timer(label)(fn)
+
+            for attempt in range(1, retries + 1):
+                try:
+                    result = timed_fn(*args, **kwargs)
+                    log.info(f"[{label}] Success on attempt {attempt}")
+                    return result
+                except handled_exceptions as e:
+                    last_exception = e
+                    log.warning(f"[{label}] Attempt {attempt}/{retries} failed: {e}")
+                    if attempt < retries and backoff_base:
+                        delay = backoff_base ** (attempt - 1)
+                        log.info(f"[{label}] Retrying in {delay}s...")
+                        time.sleep(delay)
+
+            log.error(f"[{label}] All {retries} attempts failed.")
+            raise last_exception
+
+        @staticmethod
+        def check_input(arg: Any, expected: Union[Type, Tuple[Type, ...]], label: str = "Input") -> None:
+            """
+            Verifies that the input matches the expected type(s). Raises TypeError if not.
+
+            Args:
+                arg (Any): The argument to check.
+                expected (Type or tuple of Types): The expected type(s) (e.g., str, dict, int).
+                label (str): Optional label for error clarity (e.g., function or variable name).
+
+            Raises:
+                TypeError: If the argument does not match any of the expected types.
+            """
+            if not isinstance(arg, expected):
+                exp_types = (
+                    expected.__name__
+                    if isinstance(expected, type)
+                    else ", ".join(t.__name__ for t in expected)
                 )
-                if content is None:
-                    raise TypeError("Default must be a dict (for JSON) or a str.")
+                raise TypeError(f"{label} must be of type {exp_types}, but got {type(arg).__name__}.")
 
-                path.write_text(content, encoding=encoding)
+    timer = ErrorHandling.timer
+    attempt = ErrorHandling.attempt
+    recall = ErrorHandling.attempt
+    check_input = ErrorHandling.check_input
+    ERROR_USAGE = """
+        StaticMethods ErrorHandling Aliases
+        -----------------------------------
+
+        These utility functions are exposed via aliases for convenience:
+
+        timer(label="operation") -> Callable
+            Decorator to time and log the execution duration of a function.
+            Example:
+                @timer("process_data")
+                def process_data(): ...
+
+        attempt(fn, *args, retries=3, backoff_base=None, handled_exceptions=(Exception,), label="operation", **kwargs) -> Any
+            Execute a function with retry logic, automatic timing, and logging.
+            Retries on specified exceptions and supports exponential backoff.
+
+        recall(fn, *args, **kwargs) -> Any
+            Alias for `attempt`. Useful when semantically retrying previous logic.
+
+        check_input(arg, expected, label="Input") -> None
+            Assert that an argument matches the expected type(s). Raises TypeError if not.
+            Example:
+                check_input(user_id, int, label="user_id")
+
+        try_import(package_name: str) -> Module
+            Attempts to import a package by name. If missing, installs via pip and retries.
+            Raises RuntimeError on failure.
+            Example:
+                loguru = try_import("loguru")
+    """
+
+    class PathUtil:
+        @staticmethod
+        def normalize_path(p: str | Path) -> Path:
+            """
+            Normalize a string or Path-like input to a pathlib.Path object.
+
+            Args:
+                p (str | Path): Input path to normalize.
+
+            Returns:
+                Path: A pathlib-compatible Path object.
+            """
+            return Path(p)
+
+        @staticmethod
+        def get_mileslib_root() -> Path:
+            """
+            Get the root path of the installed mileslib package.
+
+            Returns:
+                Path: The absolute directory path where mileslib is located.
+            """
+            return Path(__file__).resolve().parent
+
+        @staticmethod
+        def ensure_path(
+                path: str | Path,
+                is_file: bool = False,
+                create: bool = False,
+                verbose: bool = False
+        ) -> tuple[Path, bool]:
+            """
+            Ensure that a file or directory exists at the given path.
+
+            Args:
+                path (str | Path): The path to validate or create.
+                is_file (bool): If True, treat path as a file (creates parent directory).
+                create (bool): If True, attempt to create the path if it doesn't exist.
+                verbose (bool): If True, print messages about created paths or errors.
+
+            Returns:
+                tuple[Path, bool]: A tuple with the normalized path and a bool indicating if it existed or was created.
+            """
+            path = Path(path)
+
+            if path.exists():
+                return path, True
+
+            if not create:
+                return path, False
+
+            try:
+                if is_file:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch(exist_ok=True)
+                    if verbose:
+                        print(f"[Created File] {path}")
+                else:
+                    path.mkdir(parents=True, exist_ok=True)
+                    if verbose:
+                        print(f"[Created Directory] {path}")
+                return path, True
             except Exception as e:
-                raise OSError(f"Failed to write default content to '{path}': {e}")
+                if verbose:
+                    print(f"[Error Creating Path] {e}")
+                return path, False
 
-        return path
+        @staticmethod
+        def ensure_file_with_default(
+                path: str | Path,
+                default: dict | str,
+                encoding: str = "utf-8"
+        ) -> Path:
+            """
+            Ensure a file exists at the given path and has content.
 
+            Creates and writes to the file if it doesn't exist or is empty. The default content
+            can be a JSON-serializable dictionary or a plain string.
+
+            Args:
+                path (str | Path): Path to the file.
+                default (dict | str): Default content to write if the file is missing or empty.
+                encoding (str): File encoding to use when writing content.
+
+            Returns:
+                Path: The validated or newly created file path.
+
+            Raises:
+                TypeError: If the default content is neither a dict nor a str.
+                OSError: If writing the file fails.
+            """
+            path = Path(path)
+
+            should_write = not path.exists() or path.stat().st_size == 0
+
+            if should_write:
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    content = (
+                        json.dumps(default, indent=4)
+                        if isinstance(default, dict)
+                        else default
+                        if isinstance(default, str)
+                        else None
+                    )
+                    if content is None:
+                        raise TypeError("Default must be a dict (for JSON) or a str.")
+
+                    path.write_text(content, encoding=encoding)
+                except Exception as e:
+                    raise OSError(f"Failed to write default content to '{path}': {e}")
+
+            return path
+
+        @staticmethod
+        def validate_directory(path: str | Path) -> Path:
+            """
+            Ensure that the given path exists and is a directory.
+
+            Args:
+                path (str | Path): Path to validate or create.
+
+            Returns:
+                Path: The validated directory path.
+
+            Raises:
+                OSError: If the directory cannot be created.
+                NotADirectoryError: If the path exists but is not a directory.
+            """
+            path = Path(path)
+            if not path.exists():
+                try:
+                    path.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    raise OSError(f"Failed to create directory '{path}': {e}")
+            elif not path.is_dir():
+                raise NotADirectoryError(f"'{path}' exists but is not a directory.")
+            return path
+
+        @staticmethod
+        def validate_file(path: str | Path) -> Path:
+            """
+            Ensure that the given path exists and is a file.
+
+            Args:
+                path (str | Path): Path to validate.
+
+            Returns:
+                Path: The validated file path.
+
+            Raises:
+                FileNotFoundError: If the file does not exist.
+                IsADirectoryError: If the path is a directory instead of a file.
+            """
+            path = Path(path)
+            if not path.exists():
+                raise FileNotFoundError(f"File not found: '{path}'")
+            if path.is_dir():
+                raise IsADirectoryError(f"Expected a file but found a directory at: '{path}'")
+            return path
+
+    root = PathUtil.get_mileslib_root
+    normalize_path = PathUtil.normalize_path
+    ensure_path = PathUtil.ensure_path
+    ensure_file_with_default = PathUtil.ensure_file_with_default
+    validate_directory = PathUtil.validate_directory
+    validate_file = PathUtil.validate_file
+    PATH_USAGE = """
+    StaticMethods PathUtil Aliases
+    ------------------------------
+
+    These utility functions wrap common file and path operations:
+
+    root() -> Path
+        Returns the root path of the installed mileslib package.
+        Useful for locating bundled templates or defaults.
+
+    normalize_path(p: str | Path) -> Path
+        Normalize a string or Path-like object to a pathlib.Path.
+
+    ensure_path(path, is_file=False, create=False, verbose=False) -> tuple[Path, bool]
+        Ensure a file or directory exists. Optionally creates it.
+        Returns the normalized path and a bool indicating existence or creation.
+
+    ensure_file_with_default(path, default: dict | str, encoding="utf-8") -> Path
+        Ensure a file exists and is populated. Writes JSON or text if missing or empty.
+
+    validate_directory(path: str | Path) -> Path
+        Ensure the path exists and is a directory. Raises errors if invalid.
+
+    validate_file(path: str | Path) -> Path
+        Ensure the path exists and is a file. Raises errors if invalid or missing.
+    """
+
+    class FileIO:
+        SUPPORTED_FORMATS = ["txt", "toml", "json", "env", "yml", "yaml"]
+
+        @staticmethod
+        def read(path: Path, ext: str, section: str = None) -> dict:
+            if not path.exists():
+                print(f"[FileIO] File not found: {path}")
+                return {}
+
+            ext = ext.lower()
+            print(f"[FileIO] Reading {ext} config from {path}")
+
+            if ext == "toml":
+                import toml
+                content = toml.load(path)
+            elif ext == "json":
+                content = json.loads(path.read_text(encoding="utf-8"))
+            elif ext == "env":
+                content = {}
+                for line in path.read_text().splitlines():
+                    if "=" in line and not line.strip().startswith("#"):
+                        k, v = line.split("=", 1)
+                        content[k.strip()] = v.strip().strip('"')
+            elif ext in ("yaml", "yml"):
+                try:
+                    import yaml
+                except ImportError:
+                    raise ImportError("Install PyYAML to use YAML/YML support.")
+                content = yaml.safe_load(path.read_text())
+            elif ext == "txt":
+                content = {"content": path.read_text(encoding="utf-8")}
+            else:
+                raise ValueError(f"[FileIO] Unsupported config format: {ext}")
+
+            if section and isinstance(content, dict):
+                return content.get(section, {})
+            return content
+
+        @staticmethod
+        def write(path: Path, ext: str, data: dict, overwrite: bool = False, replace_existing: bool = False,
+                  section: str = "default"):
+            ext = ext.lower()
+            print(f"[FileIO] Writing {ext} config to {path}")
+            merged_data = data
+
+            if not overwrite and path.exists():
+                print("[FileIO] File exists — merging data")
+                existing = StaticMethods.FileIO.read(path, ext)
+
+                if ext in ("toml", "json", "yaml", "yml"):
+                    base = existing.get(section, {}) if section else existing
+                    merged = StaticMethods.FileIO._merge(base, data, replace_existing)
+                    merged_data = {section: merged} if section else merged
+                else:
+                    merged = StaticMethods.FileIO._merge(existing, data, replace_existing)
+                    merged_data = merged
+            else:
+                print("[FileIO] Overwriting existing config")
+                if ext in ("toml", "json", "yaml", "yml") and section:
+                    merged_data = {section: data}
+
+            if ext == "toml":
+                import toml
+                path.write_text(toml.dumps(merged_data), encoding="utf-8")
+            elif ext == "json":
+                path.write_text(json.dumps(merged_data, indent=2), encoding="utf-8")
+            elif ext == "env":
+                with path.open("w", encoding="utf-8") as f:
+                    for k, v in merged_data.items():
+                        f.write(f'{k}="{v}"\n')
+            elif ext in ("yaml", "yml"):
+                try:
+                    import yaml
+                except ImportError:
+                    raise ImportError("Install PyYAML to use YAML/YML support.")
+                with path.open("w", encoding="utf-8") as f:
+                    yaml.safe_dump(merged_data, f)
+            elif ext == "txt":
+                if not isinstance(data, dict) or "content" not in data:
+                    raise ValueError("TXT write requires {'content': str}")
+                path.write_text(data["content"], encoding="utf-8")
+            else:
+                raise ValueError(f"[StaticMethods.FileIO] Unsupported config format: {ext}")
+
+        @staticmethod
+        def _merge(base: dict, new: dict, replace: bool = False) -> dict:
+            print(f"[FileIO] Merging config: replace_existing={replace}")
+            merged = base.copy()
+            for k, v in new.items():
+                if k not in merged or replace:
+                    merged[k] = v
+            return merged
+
+    class Config:
+        REQUIRED_KEYS = [
+            "valid", "setup_complete", "local_version", "repo_url", "token",
+            "dependencies", "paths", "profile", "env_overrides", "env",
+            "required", "denylist", "defaults", "meta"
+        ]
+        DENYLIST = ["changeme", ""]
+
+        @staticmethod
+        def _resolve_pdir(pdir):
+            """
+            Resolve the base project directory.
+
+            Args:
+                pdir (str | Path, optional): Custom project root path.
+                                             If None, defaults to StaticMethods.root().
+
+            Returns:
+                Path: Absolute project directory as a pathlib.Path object.
+            """
+            return Path(pdir or StaticMethods.root())
+
+        @staticmethod
+        def _get_config_dir(pdir):
+            """
+            Return the configuration directory path under the given project directory.
+
+            Args:
+                pdir (Path): Root project directory.
+
+            Returns:
+                Path: Path to the project's 'config/' folder.
+            """
+            return Path(pdir) / "config"
+
+        @staticmethod
+        def _default_file_name():
+            """
+            Return the default configuration file name.
+
+            Returns:
+                str: The fallback config file name, e.g., 'settings.toml'.
+            """
+            return "settings.toml"
+
+        @staticmethod
+        def _find_settings_file(cfg_dir, is_global=False):
+            """
+            Search for the first available config file in a known priority order.
+
+            Args:
+                cfg_dir (Path): The directory to search within.
+                is_global (bool): If True, skips secrets like .env and .secrets.* files.
+
+            Returns:
+                Path: The first matching config file path found.
+            """
+            candidates = [
+                "settings.toml", "settings.yaml", "settings.yml",
+                "config.json", ".secrets.toml", ".secrets.yaml", ".env"
+            ]
+            if is_global:
+                candidates = [f for f in candidates if not f.startswith(".")]
+
+            for name in candidates:
+                path = cfg_dir / name
+                if path.exists():
+                    return path
+
+            return None
+
+        @staticmethod
+        def build(pdir=None, is_global=False, file_name=None) -> dict:
+            """
+            Load configuration from the resolved config file into a native dictionary.
+
+            Uses StaticMethods.FileIO for reading and supports fallback creation
+            if no file is found.
+
+            Args:
+                pdir (str | Path, optional): Project root. Defaults to StaticMethods.root().
+                is_global (bool): If True, disables loading secrets and .env files.
+                file_name (str, optional): Specific config file to load (e.g., 'custom.toml').
+
+            Returns:
+                dict: Parsed configuration dictionary.
+            """
+            pdir = StaticMethods.Config._resolve_pdir(pdir)
+            cfg_dir = StaticMethods.Config._get_config_dir(pdir)
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+
+            if file_name:
+                file_path = cfg_dir / file_name
+            else:
+                file_path = StaticMethods.Config._find_settings_file(cfg_dir, is_global)
+
+            if file_path is None or not file_path.exists():
+                file_path = cfg_dir / (file_name or StaticMethods.Config._default_file_name())
+                StaticMethods.FileIO.write(file_path, "toml", {"valid": True}, overwrite=True)
+
+            ext = file_path.suffix.lstrip(".")
+            return StaticMethods.FileIO.read(file_path, ext)
+
+        @staticmethod
+        def write(pdir=None, file_name="settings.toml", data=None, overwrite=False, replace_existing=False):
+            """
+            Write configuration data to the specified config file using FileIO.
+
+            Supports overwrite or merge mode, depending on flags provided.
+
+            Args:
+                pdir (str | Path, optional): Project root directory.
+                file_name (str): Name of the file to write (e.g., 'settings.toml').
+                data (dict): Data to write.
+                overwrite (bool): If True, replace the file entirely.
+                replace_existing (bool): If False, keep existing values unless missing.
+            """
+            pdir = StaticMethods.Config._resolve_pdir(pdir)
+            cfg_dir = StaticMethods.Config._get_config_dir(pdir)
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+
+            file_path = cfg_dir / file_name
+            ext = file_path.suffix.lstrip(".")
+
+            StaticMethods.FileIO.write(file_path, ext, data or {}, overwrite, replace_existing)
+
+        @staticmethod
+        def get(*keys, pdir=None, default=None, expected=None, is_global=False, section="default"):
+            data = StaticMethods.Config.build(pdir=pdir, is_global=is_global)
+
+            if section and isinstance(data, dict):
+                data = data.get(section, {})
+
+            try:
+                for key in keys:
+                    if isinstance(data, dict):
+                        data = data.get(key, default)
+                    else:
+                        return default
+
+                if expected is not None and data != expected:
+                    raise ValueError(f"[Config.get] Expected {expected!r}, got {data!r}")
+                return data
+            except Exception as e:
+                raise RuntimeError(f"[Config.get] {e}")
+
+        @staticmethod
+        def require(keys, root="env", denylist=None, pdir=None):
+            """
+            Ensure that required configuration keys exist and are not denylisted.
+
+            Args:
+                keys (list[str]): Keys to check under the root (e.g., ['token', 'repo_url']).
+                root (str): Top-level config section to look in (default: 'env').
+                denylist (list[str], optional): Values considered invalid.
+                pdir (str | Path, optional): Project root directory.
+
+            Returns:
+                bool: True if all keys are valid.
+
+            Raises:
+                RuntimeError: If required keys are missing or contain denylisted values.
+            """
+            cfg = StaticMethods.Config.build(pdir)
+            denylist = denylist or StaticMethods.Config.DENYLIST
+            missing = []
+            invalid = []
+
+            for key in keys:
+                val = cfg.get(root, {}).get(key) if root else cfg.get(key)
+                if val is None:
+                    missing.append(key)
+                elif val in denylist:
+                    invalid.append(key)
+
+            if missing or invalid:
+                raise RuntimeError(f"Missing: {missing}, Invalid: {invalid}")
+            return True
+
+        @staticmethod
+        def dump(pdir=None, file_name=None):
+            """
+            Print the current configuration contents as formatted JSON.
+
+            Useful for debugging or CLI inspection.
+
+            Args:
+                pdir (str | Path, optional): Project directory.
+                file_name (str, optional): Config file to dump (default: auto-detect).
+            """
+            cfg = StaticMethods.Config.build(pdir, file_name=file_name)
+            print(json.dumps(cfg, indent=2))
+
+    cfg_get = Config.get
+    cfg_require = Config.require
+    cfg_dump = Config.dump
+    cfg_write = Config.write
+    cfg_build = Config.build
+    CONFIG_USAGE = """
+    StaticMethods Config Aliases
+    ----------------------------
+
+    Lightweight configuration utilities powered by FileIO.
+
+    cfg_get(*keys, pdir=None, default=None, expected=None, section="default") -> Any
+        Retrieve a nested configuration value using one or more keys.
+        Supports default fallback and optional value assertion.
+        Example:
+            token = cfg_get("env", "token")
+
+    cfg_require(keys: list[str], root="env", denylist=None, pdir=None) -> bool
+        Ensure specified keys exist and do not contain denylisted values.
+        Raises RuntimeError if validation fails.
+        Example:
+            cfg_require(["repo_url", "token"])
+
+    cfg_dump(pdir=None, file_name=None) -> None
+        Print the active configuration as pretty-printed JSON.
+        Useful for debugging and inspection.
+        Example:
+            cfg_dump()
+
+    cfg_write(pdir=None, file_name="settings.toml", data=None, overwrite=False, replace_existing=False)
+        Write configuration data to file. Supports TOML, JSON, ENV, YAML.
+        If overwrite is False, existing values will be preserved unless replace_existing=True.
+        Example:
+            cfg_write(data={"token": "abc123"})
+
+    cfg_build(pdir=None, is_global=False, file_name=None) -> dict
+        Load configuration from disk into a raw dictionary.
+        Automatically bootstraps missing files with a default schema.
+        Example:
+            config = cfg_build()
+    """
+
+    class Logger:
+        _configured = False
+        _current_log_path = None
+        _logger = None
+
+        @staticmethod
+        def try_import_loguru():
+            """
+            Import and return the loguru logger instance.
+
+            Returns:
+                loguru.logger: The loguru logger object.
+
+            Raises:
+                RuntimeError: If loguru cannot be imported or installed.
+            """
+            loguru = StaticMethods.try_import("loguru")
+            return loguru.logger
+
+        @staticmethod
+        def get_loguru():
+            """
+            Return the active loguru logger after initialization.
+
+            Returns:
+                loguru.logger: The configured logger object.
+
+            Raises:
+                RuntimeError: If the logger has not been initialized via `init_logger`.
+            """
+            if not StaticMethods.Logger._configured:
+                raise RuntimeError("Logger has not been initialized. Call init_logger() first.")
+            return StaticMethods.Logger._logger
+
+        @staticmethod
+        def init_logger(
+                log_dir: Path = Path("logs"),
+                label: str = None,
+                serialize: bool = True,
+                pretty_console: bool = True,
+                level: str = "INFO",
+        ):
+            """
+            Initialize and configure the loguru logger.
+
+            Sets up both console and file logging, with optional serialization and formatting.
+            Creates a timestamped log file in the specified directory.
+
+            Args:
+                log_dir (Path): Directory to store log files. Defaults to 'logs/'.
+                label (str, optional): Optional label appended to the log filename.
+                serialize (bool): If True, logs are JSON-formatted.
+                pretty_console (bool): If True, enables human-readable console output.
+                level (str): Minimum log level to record (e.g., 'DEBUG', 'INFO').
+
+            Returns:
+                loguru.logger: The configured logger instance.
+            """
+            loguru = StaticMethods.Logger.try_import_loguru()
+
+            if StaticMethods.Logger._configured:
+                return loguru
+
+            # Ensure log directory exists (uses PathUtil)
+            log_dir, _ = StaticMethods.ensure_path(log_dir, is_file=False, create=True)
+
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
+            label = f"_{label}" if label else ""
+            log_path = log_dir / f"{timestamp}{label}.log"
+
+            if pretty_console:
+                loguru.add(sys.stderr, level=level, enqueue=True)
+
+            loguru.add(log_path, level=level, serialize=serialize, rotation="10 MB", enqueue=True)
+
+            StaticMethods.Logger._logger = loguru
+            StaticMethods.Logger._current_log_path = log_path
+            StaticMethods.Logger._configured = True
+            return loguru
+
+        @staticmethod
+        def get_logger():
+            """
+            Return the configured logger instance, initializing it if needed.
+
+            Returns:
+                loguru.logger: The active logger object.
+            """
+            if not StaticMethods.Logger._configured:
+                return StaticMethods.Logger.init_logger()
+            return StaticMethods.Logger._logger
+
+        @staticmethod
+        def reset_logger():
+            """
+            Reset the logger state by removing all handlers and clearing configuration.
+
+            Resets the internal flags and allows reinitialization via `init_logger()`.
+            """
+            loguru = StaticMethods.Logger.try_import_loguru()
+            loguru.remove()
+            StaticMethods.Logger._current_log_path = None
+            StaticMethods.Logger._configured = False
+            StaticMethods.Logger._logger = None
+
+    # log = Logger.get_logger()
+    # log_path = Logger._current_log_path
+    # log_exists = Logger._configured
+    LOGGER_USAGE = """
+    Logger Aliases
+    --------------
+
+    log -> Logger.get_logger()
+        Retrieve the active loguru logger instance (auto-initializes if needed).
+
+    log_path -> Logger._current_log_path
+        The full Path to the current log file (or None if uninitialized).
+
+    log_exists -> Logger._configured
+        Boolean flag indicating whether the logger has been initialized.
+    """
+
+    class Requests:
+        @staticmethod
+        def http_get(url: str, retries: int = 3) -> requests.Response:
+            """
+            Perform an HTTP GET request with retry logic and logging.
+
+            Args:
+                url (str): The URL to send the GET request to.
+                retries (int): Number of retry attempts if the request fails. Default is 3.
+
+            Returns:
+                requests.Response: The HTTP response object.
+
+            Raises:
+                requests.HTTPError: If the request fails after all retries.
+                TypeError: If input types are incorrect.
+            """
+            log = StaticMethods.log
+            StaticMethods.try_import("requests")
+            StaticMethods.check_input(url, str, "url")
+            StaticMethods.check_input(retries, int, "retries")
+            log.info("Starting GET request", url=url)
+
+            # define the single‐try function
+            def _do_get():
+                resp = requests.get(url)
+                resp.raise_for_status()
+                return resp
+
+            # delegate retry logic
+            return StaticMethods.attempt(_do_get, retries=retries)
+
+        @staticmethod
+        def http_post(url: str, data: dict, retries: int = 3) -> requests.Response:
+            """
+            Perform an HTTP POST request with a JSON payload, including retry logic and logging.
+
+            Args:
+                url (str): The URL to send the POST request to.
+                data (dict): The JSON-serializable data to include in the POST body.
+                retries (int): Number of retry attempts if the request fails. Default is 3.
+
+            Returns:
+                requests.Response: The HTTP response object.
+
+            Raises:
+                requests.HTTPError: If the request fails after all retries.
+                TypeError: If input types are incorrect.
+            """
+            log = StaticMethods.log
+            StaticMethods.try_import("requests")
+            StaticMethods.check_input(url, str, "url")
+            StaticMethods.check_input(data, dict, "data")
+            StaticMethods.check_input(retries, int, "retries")
+            log.info("Starting POST request", url=url, payload=data)
+
+            def _do_post():
+                resp = requests.post(url, json=data)
+                resp.raise_for_status()
+                return resp
+
+            return StaticMethods.attempt(_do_post, retries=retries)
+
+    http_get = Requests.http_get
+    http_post = Requests.http_post
+    REQUESTS_USAGE = """
+    StaticMethods Requests Aliases
+    ------------------------------
+
+    http_get(url: str, retries=3) -> requests.Response
+        Perform a GET request with automatic retry and logging.
+
+    http_post(url: str, data: dict, retries=3) -> requests.Response
+        Perform a POST request with JSON payload, retry support, and logging.
+    """
+
+
+StaticMethods.log = StaticMethods.Logger.get_logger()  # this is for testing purposes only
 sm = StaticMethods
+log = StaticMethods.Logger.get_logger()
 
 class MilesLib:
     def __init__(self, pdir: Path = os.getcwd()):
-        self.pdir = sm.validate_instance_directory(pdir)
+        #self.pdir = sm.validate_instance_directory(pdir)
         self.launch_time = datetime.utcnow()
         self.launch_time_file_name = self.launch_time.strftime("%Y-%m-%d_%H-%M-%S")
 
-class MilesLogger:
-    _configured = False
-    _current_log_path = None
-    _logger = None
-
-    @staticmethod
-    def try_import_loguru():
-        loguru = sm.try_import("loguru")
-        return loguru.logger
-
-    @staticmethod
-    def get_loguru():
-        if not MilesLogger._configured:
-            raise RuntimeError("Logger has not been initialized. Call init_logger() first.")
-        return MilesLogger.try_import_loguru()
-
-    @staticmethod
-    def init_logger(
-        log_dir: Path = Path("logs"),
-        label: str = None,
-        serialize: bool = True,
-        pretty_console: bool = True,
-        level: str = "INFO",
-    ):
-        loguru = MilesLogger.try_import_loguru()
-
-        if MilesLogger._configured:
-            return loguru
-
-        log_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-        label = f"_{label}" if label else ""
-        log_path = log_dir / f"{timestamp}{label}.log"
-
-        if pretty_console:
-            loguru.add(sys.stderr, level=level, enqueue=True)
-
-        loguru.add(log_path, level=level, serialize=serialize, rotation="10 MB", enqueue=True)
-
-        MilesLogger._logger = loguru  # ← Add this line
-        MilesLogger._current_log_path = log_path
-        MilesLogger._configured = True
-        return loguru
-
-    @staticmethod
-    def get_logger():
-        if not MilesLogger._configured:
-            return MilesLogger.init_logger()
-        return MilesLogger._logger
-
-    @staticmethod
-    def reset_logger():
-        loguru = MilesLogger.try_import_loguru()
-        loguru.remove()
-        MilesLogger._current_log_path = None
-        MilesLogger._configured = False
-        MilesLogger._logger = None
-
-log = MilesLogger.get_logger()
-log_path = MilesLogger._current_log_path
-log_exists = MilesLogger._configured
-
-class Config:
-    def __init__(self, inst):
-        """
-        Initializes the Config class for the client. A subclass of the main MilesLib instance.
-        Validates the incoming instance and its directory before proceeding.
-        """
-        StaticMethods.validate_instance(inst=inst)
-        self.m = inst
-        self.pdir = StaticMethods.validate_instance_directory(pdir=self.m.pdir)
-
-        # Directory Initialization
-        self.cfg_dir = os.path.join(self.pdir, "config")
-        StaticMethods.validate_directory(self.cfg_dir)
-        self.cfg_file = self.build_config(self.cfg_dir)
-
-    @staticmethod
-    def build_config(cfg_dir):
-        file = os.path.join(cfg_dir, "config.json")
-        if os.path.exists(file):
-            build: Path = StaticMethods.validate_file(file)
-            return build
-        else:
-            build: Path = StaticMethods.ensure_file_with_default("tests/.dev/config/config.json",
-                                                                 default={"app_name": "MilesApp", "version": "1.0"})
-            return build
-
-    def get(self, *args: str | list | tuple):
-        file = self.cfg_file
-        for arg in args:
-            if not isinstance(arg, (str, int)):
-                raise TypeError(f"Invalid path for config.get(): {arg!r} must be str, list, or int")
-
-        def load_and_traverse():
-            if os.stat(file).st_size == 0:
-                StaticMethods.ensure_file_with_default("tests/.dev/config/config.json",
-                                                       default={"app_name": "MilesApp", "version": "1.0"})
-            with open(file, "r", encoding="utf-8") as f:
-                config_data = json.load(f)
-
-            return StaticMethods.traverse_dictionary(config_data, *args)
-
-        try:
-            setting = StaticMethods.recall(
-                fn=load_and_traverse,
-                max_attempts=3,
-                handled_exceptions=(json.JSONDecodeError, FileNotFoundError)
-            )
-
-            if setting is None:
-                raise Exception(f"Requested setting not found in {file}. Please amend.")
-            return setting
-
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Invalid JSON in {file}: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Unexpected error reading {file}: {e}")
-
 if __name__ == "__main__":
-    # CLI bootstraps to mileslib.cli.main:cli
     from cli.main import cli
     cli()

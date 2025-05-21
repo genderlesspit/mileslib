@@ -11,7 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
-from decouple import config
+from mileslib import StaticMethods as sm
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -72,16 +72,19 @@ WSGI_APPLICATION = 'mileslib_api.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+#SECRET_KEY = sm.cfg_get("SECRET_KEY", default="changeme")
+
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': config("POSTGRES_DB"),
-        'USER': config("POSTGRES_USER"),
-        'PASSWORD': config("POSTGRES_PASSWORD"),
-        'HOST': config("POSTGRES_HOST", default="localhost"),
-        'PORT': config("POSTGRES_PORT", default="5432"),
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": sm.cfg_get("POSTGRES_DB", default="mydb"),
+        "USER": sm.cfg_get("POSTGRES_USER", default="postgres"),
+        "PASSWORD": sm.cfg_get("POSTGRES_PASSWORD", default="changeme"),
+        "HOST": sm.cfg_get("POSTGRES_HOST", default="localhost"),
+        "PORT": sm.cfg_get("POSTGRES_PORT", default="5432"),
     }
 }
+
 
 
 # Password validation
@@ -132,15 +135,16 @@ AUTHENTICATION_BACKENDS = [
 ]
 
 AUTH_ADFS = {
-    "AUDIENCE": "YOUR-CLIENT-ID",              # from Azure App Registration
-    "CLIENT_ID": "YOUR-CLIENT-ID",
-    "CLIENT_SECRET": "YOUR-CLIENT-SECRET",      # generate this in Azure
-    "TENANT_ID": "YOUR-TENANT-ID",
-    "RELYING_PARTY_ID": "YOUR-CLIENT-ID",       # usually same as client ID
-    "REDIR_URI": "http://localhost:8000/oauth2/callback",  # or your public domain
+    "AUDIENCE": sm.cfg_get("DJANGO_CLIENT_ID", default="changeme"),
+    "CLIENT_ID": sm.cfg_get("DJANGO_CLIENT_ID", default="changeme"),
+    "CLIENT_SECRET": sm.cfg_get("DJANGO_CLIENT_SECRET", default="changeme"),
+    "TENANT_ID": sm.cfg_get("DJANGO_TENANT_ID", default="changeme"),
+    "RELYING_PARTY_ID": sm.cfg_get("DJANGO_CLIENT_ID", default="changeme"),
+    "REDIR_URI": sm.cfg_get("DJANGO_REDIRECT_URI", default="http://localhost:8000/oauth2/callback"),
     "LOGIN_REDIRECT_URL": "/",
-    "USERNAME_CLAIM": "upn",                    # or preferred_username
+    "USERNAME_CLAIM": "upn",
 }
+
 
 LOGIN_URL = "/oauth2/login/"
 LOGOUT_REDIRECT_URL = "https://login.microsoftonline.com/common/oauth2/logout"

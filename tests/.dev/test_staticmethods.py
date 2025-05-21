@@ -3,6 +3,7 @@ from unittest import mock
 import pytest
 import importlib.util
 import requests
+import toml
 from typing import Any, List, Union, Mapping, Sequence, Callable, Tuple, Type, Optional
 from types import ModuleType
 import json
@@ -423,6 +424,99 @@ class StaticMethods:
         Ensure the path exists and is a file. Raises errors if invalid or missing.
     """
 
+    class FileIO:
+        SUPPORTED_FORMATS = ["txt", "toml", "json", "env", "yml", "yaml"]
+
+        @staticmethod
+        def read(path: Path, ext: str, section: str = None) -> dict:
+            if not path.exists():
+                print(f"[FileIO] File not found: {path}")
+                return {}
+
+            ext = ext.lower()
+            print(f"[FileIO] Reading {ext} config from {path}")
+
+            if ext == "toml":
+                import toml
+                content = toml.load(path)
+            elif ext == "json":
+                content = json.loads(path.read_text(encoding="utf-8"))
+            elif ext == "env":
+                content = {}
+                for line in path.read_text().splitlines():
+                    if "=" in line and not line.strip().startswith("#"):
+                        k, v = line.split("=", 1)
+                        content[k.strip()] = v.strip().strip('"')
+            elif ext in ("yaml", "yml"):
+                try:
+                    import yaml
+                except ImportError:
+                    raise ImportError("Install PyYAML to use YAML/YML support.")
+                content = yaml.safe_load(path.read_text())
+            elif ext == "txt":
+                content = {"content": path.read_text(encoding="utf-8")}
+            else:
+                raise ValueError(f"[FileIO] Unsupported config format: {ext}")
+
+            if section and isinstance(content, dict):
+                return content.get(section, {})
+            return content
+
+        @staticmethod
+        def write(path: Path, ext: str, data: dict, overwrite: bool = False, replace_existing: bool = False,
+                  section: str = "default"):
+            ext = ext.lower()
+            print(f"[FileIO] Writing {ext} config to {path}")
+            merged_data = data
+
+            if not overwrite and path.exists():
+                print("[FileIO] File exists — merging data")
+                existing = StaticMethods.FileIO.read(path, ext)
+
+                if ext in ("toml", "json", "yaml", "yml"):
+                    base = existing.get(section, {}) if section else existing
+                    merged = StaticMethods.FileIO._merge(base, data, replace_existing)
+                    merged_data = {section: merged} if section else merged
+                else:
+                    merged = StaticMethods.FileIO._merge(existing, data, replace_existing)
+                    merged_data = merged
+            else:
+                print("[FileIO] Overwriting existing config")
+                if ext in ("toml", "json", "yaml", "yml") and section:
+                    merged_data = {section: data}
+
+            if ext == "toml":
+                import toml
+                path.write_text(toml.dumps(merged_data), encoding="utf-8")
+            elif ext == "json":
+                path.write_text(json.dumps(merged_data, indent=2), encoding="utf-8")
+            elif ext == "env":
+                with path.open("w", encoding="utf-8") as f:
+                    for k, v in merged_data.items():
+                        f.write(f'{k}="{v}"\n')
+            elif ext in ("yaml", "yml"):
+                try:
+                    import yaml
+                except ImportError:
+                    raise ImportError("Install PyYAML to use YAML/YML support.")
+                with path.open("w", encoding="utf-8") as f:
+                    yaml.safe_dump(merged_data, f)
+            elif ext == "txt":
+                if not isinstance(data, dict) or "content" not in data:
+                    raise ValueError("TXT write requires {'content': str}")
+                path.write_text(data["content"], encoding="utf-8")
+            else:
+                raise ValueError(f"[StaticMethods.FileIO] Unsupported config format: {ext}")
+
+        @staticmethod
+        def _merge(base: dict, new: dict, replace: bool = False) -> dict:
+            print(f"[FileIO] Merging config: replace_existing={replace}")
+            merged = base.copy()
+            for k, v in new.items():
+                if k not in merged or replace:
+                    merged[k] = v
+            return merged
+
     class Config:
         REQUIRED_KEYS = [
             "valid", "setup_complete", "local_version", "repo_url", "token",
@@ -432,304 +526,230 @@ class StaticMethods:
         DENYLIST = ["changeme", ""]
 
         @staticmethod
-        def _resolve_pdir(pdir: str | Path = None) -> Path:
+        def _resolve_pdir(pdir):
             """
-            Resolve and return a base project directory.
+            Resolve the base project directory.
 
             Args:
-                pdir (str | Path, optional): A custom directory. If None, defaults to StaticMethods.root().
+                pdir (str | Path, optional): Custom project root path.
+                                             If None, defaults to StaticMethods.root().
 
             Returns:
-                Path: The resolved project directory as a pathlib.Path object.
+                Path: Absolute project directory as a pathlib.Path object.
             """
             return Path(pdir or StaticMethods.root())
 
         @staticmethod
-        def _get_config_dir(pdir: Path) -> Path:
+        def _get_config_dir(pdir):
             """
-            Return the config subdirectory under a given project root.
+            Return the configuration directory path under the given project directory.
 
             Args:
-                pdir (Path): The base project directory.
+                pdir (Path): Root project directory.
 
             Returns:
-                Path: Path to the 'config' directory inside the project.
+                Path: Path to the project's 'config/' folder.
             """
-            return pdir / "config"
+            return Path(pdir) / "config"
 
         @staticmethod
-        def _find_settings_files(cfg_dir: Path, is_global: bool = False) -> list[str]:
+        def _default_file_name():
             """
-            Find valid configuration files in the config directory, based on known filename priorities.
-
-            Args:
-                cfg_dir (Path): Directory to search for configuration files.
-                is_global (bool): If True, filters out secrets and .env files.
+            Return the default configuration file name.
 
             Returns:
-                list[str]: List of matching settings file paths (as strings).
+                str: The fallback config file name, e.g., 'settings.toml'.
             """
-            # File detection based on priority
+            return "settings.toml"
+
+        @staticmethod
+        def _find_settings_file(cfg_dir, is_global=False):
+            """
+            Search for the first available config file in a known priority order.
+
+            Args:
+                cfg_dir (Path): The directory to search within.
+                is_global (bool): If True, skips secrets like .env and .secrets.* files.
+
+            Returns:
+                Path: The first matching config file path found.
+            """
             candidates = [
                 "settings.toml", "settings.yaml", "settings.yml",
                 "config.json", ".secrets.toml", ".secrets.yaml", ".env"
             ]
             if is_global:
-                # Restrict secret files and .env from being loaded globally
                 candidates = [f for f in candidates if not f.startswith(".")]
 
-            return [str(cfg_dir / f) for f in candidates if (cfg_dir / f).exists()]
+            for name in candidates:
+                path = cfg_dir / name
+                if path.exists():
+                    return path
+
+            return None
 
         @staticmethod
-        def _bootstrap_default_file(cfg_dir: Path) -> Path:
+        def build(pdir=None, is_global=False, file_name=None) -> dict:
             """
-            Create a default `settings.toml` file if it doesn't exist.
+            Load configuration from the resolved config file into a native dictionary.
+
+            Uses StaticMethods.FileIO for reading and supports fallback creation
+            if no file is found.
 
             Args:
-                cfg_dir (Path): The directory where the file should be created.
+                pdir (str | Path, optional): Project root. Defaults to StaticMethods.root().
+                is_global (bool): If True, disables loading secrets and .env files.
+                file_name (str, optional): Specific config file to load (e.g., 'custom.toml').
 
             Returns:
-                Path: Path to the created or existing `settings.toml` file.
+                dict: Parsed configuration dictionary.
             """
-            path = cfg_dir / "settings.toml"
-            if not path.exists():
-                StaticMethods.log.info(f"[Config] No config found — creating default at {path}")
-                path.write_text("[default]\nvalid = true\n", encoding="utf-8")
-            return path
+            pdir = StaticMethods.Config._resolve_pdir(pdir)
+            cfg_dir = StaticMethods.Config._get_config_dir(pdir)
+            cfg_dir.mkdir(parents=True, exist_ok=True)
+
+            if file_name:
+                file_path = cfg_dir / file_name
+            else:
+                file_path = StaticMethods.Config._find_settings_file(cfg_dir, is_global)
+
+            if file_path is None or not file_path.exists():
+                file_path = cfg_dir / (file_name or StaticMethods.Config._default_file_name())
+                StaticMethods.FileIO.write(file_path, "toml", {"valid": True}, overwrite=True)
+
+            ext = file_path.suffix.lstrip(".")
+            return StaticMethods.FileIO.read(file_path, ext)
 
         @staticmethod
-        def build(pdir: str | Path = None, is_global: bool = False) -> Dynaconf:
+        def write(pdir=None, file_name="settings.toml", data=None, overwrite=False, replace_existing=False):
             """
-            Load Dynaconf configuration based on detected settings files.
+            Write configuration data to the specified config file using FileIO.
+
+            Supports overwrite or merge mode, depending on flags provided.
 
             Args:
-                pdir (str | Path, optional): Project directory to search for config. Defaults to project root.
-                is_global (bool): If True, limits secrets and disables .env loading.
-
-            Returns:
-                Dynaconf: A loaded Dynaconf settings object with merged environments.
+                pdir (str | Path, optional): Project root directory.
+                file_name (str): Name of the file to write (e.g., 'settings.toml').
+                data (dict): Data to write.
+                overwrite (bool): If True, replace the file entirely.
+                replace_existing (bool): If False, keep existing values unless missing.
             """
-            cfg = StaticMethods.Config
-            pdir = cfg._resolve_pdir(pdir)
-            cfg_dir = cfg._get_config_dir(pdir)
-            StaticMethods.validate_directory(cfg_dir)
+            pdir = StaticMethods.Config._resolve_pdir(pdir)
+            cfg_dir = StaticMethods.Config._get_config_dir(pdir)
+            cfg_dir.mkdir(parents=True, exist_ok=True)
 
-            settings_files = cfg._find_settings_files(cfg_dir, is_global=is_global)
-            if not settings_files and not is_global:
-                settings_files = [str(cfg._bootstrap_default_file(cfg_dir))]
+            file_path = cfg_dir / file_name
+            ext = file_path.suffix.lstrip(".")
 
-            return Dynaconf(
-                settings_files=settings_files,
-                envvar_prefix="MILESLIB",
-                load_dotenv=not is_global,
-                environments=True,
-                merge_enabled=True
-            )
+            StaticMethods.FileIO.write(file_path, ext, data or {}, overwrite, replace_existing)
 
         @staticmethod
-        def get(*keys, pdir: str | Path = None, default=None, expected=None, is_global: bool = False):
-            """
-            Retrieve a nested configuration value using one or more keys.
+        def get(*keys, pdir=None, default=None, expected=None, is_global=False, section="default"):
+            data = StaticMethods.Config.build(pdir=pdir, is_global=is_global)
 
-            Args:
-                *keys: One or more keys to traverse into the configuration.
-                pdir (str | Path, optional): Optional project directory.
-                default (Any): Value to return if the key path doesn't exist.
-                expected (Any): If set, validates that the retrieved value matches.
-                is_global (bool): Whether to use global configuration.
-
-            Returns:
-                Any: The retrieved configuration value.
-
-            Raises:
-                ValueError: If the value does not match the expected one.
-                RuntimeError: If an error occurs while accessing configuration.
-            """
-            cfg = StaticMethods.Config
-            log = StaticMethods.log
-            settings = cfg.build(pdir, is_global=is_global)
+            if section and isinstance(data, dict):
+                data = data.get(section, {})
 
             try:
-                result = settings
                 for key in keys:
-                    result = result.get(key, default)
+                    if isinstance(data, dict):
+                        data = data.get(key, default)
+                    else:
+                        return default
 
-                if expected is not None and result != expected:
-                    joined = " → ".join(map(str, keys))
-                    raise ValueError(f"[Config.get] Expected {expected!r} at {joined}, got {result!r}")
-
-                return result
+                if expected is not None and data != expected:
+                    raise ValueError(f"[Config.get] Expected {expected!r}, got {data!r}")
+                return data
             except Exception as e:
                 raise RuntimeError(f"[Config.get] {e}")
 
         @staticmethod
-        def require(
-                keys: list[str],
-                *,
-                root: str = "env",
-                denylist: list[str] = None,
-                pdir: str | Path = None,
-                is_global: bool = False
-        ) -> bool:
+        def require(keys, root="env", denylist=None, pdir=None):
             """
-            Assert that a list of required keys exist and are not in the denylist.
+            Ensure that required configuration keys exist and are not denylisted.
 
             Args:
-                keys (list[str]): Keys to verify within the configuration.
-                root (str): Root section to check (e.g., "env").
-                denylist (list[str], optional): Values that are considered invalid (e.g., "changeme").
-                pdir (str | Path, optional): Project directory to load config from.
-                is_global (bool): Whether to use global configuration.
+                keys (list[str]): Keys to check under the root (e.g., ['token', 'repo_url']).
+                root (str): Top-level config section to look in (default: 'env').
+                denylist (list[str], optional): Values considered invalid.
+                pdir (str | Path, optional): Project root directory.
 
             Returns:
-                bool: True if all keys are present and valid.
+                bool: True if all keys are valid.
 
             Raises:
                 RuntimeError: If required keys are missing or contain denylisted values.
             """
-            cfg = StaticMethods.Config
-            log = StaticMethods.log
-            settings = cfg.build(pdir, is_global=is_global)
-            denylist = denylist or cfg.DENYLIST
+            cfg = StaticMethods.Config.build(pdir)
+            denylist = denylist or StaticMethods.Config.DENYLIST
             missing = []
-            bad = []
+            invalid = []
 
             for key in keys:
-                # fetch the value (None if not present)
-                val = settings.get(root, {}).get(key) if root else settings.get(key)
+                val = cfg.get(root, {}).get(key) if root else cfg.get(key)
                 if val is None:
                     missing.append(key)
                 elif val in denylist:
-                    bad.append((key, val))
+                    invalid.append(key)
 
-            if missing or bad:
-                if missing:
-                    log.warning(f"[Config.require] Missing keys: {missing}")
-                if bad:
-                    log.warning(f"[Config.require] Invalid values: {bad}")
-                raise RuntimeError(f"Missing: {missing}\nInvalid: {bad}")
-
+            if missing or invalid:
+                raise RuntimeError(f"Missing: {missing}, Invalid: {invalid}")
             return True
 
         @staticmethod
-        def ensure_setup(pdir: str | Path = None):
+        def dump(pdir=None, file_name=None):
             """
-            Ensure that the configuration is valid and the environment is correctly initialized.
+            Print the current configuration contents as formatted JSON.
 
-            Checks for required keys, validates paths, and ensures tokens are secure.
-            Creates directories and files listed in the 'paths' section as needed.
+            Useful for debugging or CLI inspection.
 
             Args:
-                pdir (str | Path, optional): The project directory to load configuration from.
-
-            Raises:
-                RuntimeError: If setup is incomplete, paths are invalid, or required values are insecure.
+                pdir (str | Path, optional): Project directory.
+                file_name (str, optional): Config file to dump (default: auto-detect).
             """
-            cfg = StaticMethods.Config
-            log = StaticMethods.log
-            settings = cfg.build(pdir, is_global=False)
-
-            cfg.require(cfg.REQUIRED_KEYS, root=None, denylist=cfg.DENYLIST, pdir=pdir)
-
-            paths = settings.get("paths", {})
-            for label, raw_path in paths.items():
-                path_obj = Path(raw_path)
-                if "log" in label or "dir" in label:
-                    StaticMethods.validate_directory(path_obj)
-                elif ".env" in label or path_obj.suffix:
-                    StaticMethods.ensure_file_with_default(path_obj, default="")
-
-            if not settings.get("setup_complete"):
-                raise RuntimeError("setup_complete is false. Please finish project setup.")
-
-            token = settings.get("token")
-            if not token or token in cfg.DENYLIST:
-                raise RuntimeError("Missing or insecure token value.")
-
-        @staticmethod
-        def dump(pdir: str | Path = None, env: str = None, is_global: bool = False):
-            """
-            Print the full configuration as a formatted JSON string.
-
-            Args:
-                pdir (str | Path, optional): The project directory to load configuration from.
-                env (str, optional): Specific environment to dump (e.g., "default", "development").
-                is_global (bool): Whether to use global configuration.
-            """
-            cfg = StaticMethods.Config
-            settings = cfg.build(pdir, is_global=is_global)
-            raw = settings.as_dict(env=env)
-            print(json.dumps(raw, indent=2))
-
-        @staticmethod
-        def exists(*keys, pdir: str | Path = None, is_global: bool = False) -> bool:
-            """
-            Check whether a given nested key exists in the configuration by
-            traversing the raw dict from to_dict(), explicitly loading the
-            "default" environment so JSON/TOML values under "default" are seen.
-            """
-            try:
-                # Force to_dict to unwrap and return only the "default" section
-                data = StaticMethods.Config.to_dict(
-                    pdir=pdir,
-                    env="default",
-                    is_global=is_global
-                )
-                cur = data
-                for key in keys:
-                    if isinstance(cur, dict) and key in cur:
-                        cur = cur[key]
-                    else:
-                        return False
-                return True
-            except Exception:
-                return False
-
-        @staticmethod
-        def to_dict(pdir: str | Path = None, env: str = None, is_global: bool = False) -> dict:
-            """
-            Return the full configuration as a dictionary.
-
-            Args:
-                pdir (str | Path, optional): Project directory to load configuration from.
-                env (str, optional): Specific environment to return.
-                is_global (bool): Whether to use global configuration.
-
-            Returns:
-                dict: The full loaded configuration as a native dictionary.
-            """
-            cfg = StaticMethods.Config
-            return cfg.build(pdir, is_global=is_global).as_dict(env=env)
+            cfg = StaticMethods.Config.build(pdir, file_name=file_name)
+            print(json.dumps(cfg, indent=2))
 
     cfg_get = Config.get
-    cfg_validate = Config.ensure_setup
     cfg_require = Config.require
     cfg_dump = Config.dump
+    cfg_write = Config.write
+    cfg_build = Config.build
     CONFIG_USAGE = """
     StaticMethods Config Aliases
     ----------------------------
 
-    Configuration access and validation utilities powered by Dynaconf:
+    Lightweight configuration utilities powered by FileIO.
 
-    cfg_get(*keys, pdir=None, default=None, expected=None, is_global=False) -> Any
+    cfg_get(*keys, pdir=None, default=None, expected=None, section="default") -> Any
         Retrieve a nested configuration value using one or more keys.
-        Supports fallback defaults and value assertions.
+        Supports default fallback and optional value assertion.
         Example:
             token = cfg_get("env", "token")
 
-    cfg_require(keys: list[str], root="env", denylist=None, pdir=None, is_global=False) -> bool
-        Assert that required keys exist and do not match denylisted values.
-        Raises RuntimeError if checks fail.
+    cfg_require(keys: list[str], root="env", denylist=None, pdir=None) -> bool
+        Ensure specified keys exist and do not contain denylisted values.
+        Raises RuntimeError if validation fails.
         Example:
-            cfg_require(["token", "repo_url"])
+            cfg_require(["repo_url", "token"])
 
-    cfg_validate(pdir=None) -> None
-        Validates core setup and required config structure for MilesLib.
-        Ensures key paths and credentials exist and are secure.
-
-    cfg_dump(pdir=None, env=None, is_global=False) -> None
-        Print the full configuration as pretty-printed JSON.
+    cfg_dump(pdir=None, file_name=None) -> None
+        Print the active configuration as pretty-printed JSON.
         Useful for debugging and inspection.
+        Example:
+            cfg_dump()
+
+    cfg_write(pdir=None, file_name="settings.toml", data=None, overwrite=False, replace_existing=False)
+        Write configuration data to file. Supports TOML, JSON, ENV, YAML.
+        If overwrite is False, existing values will be preserved unless replace_existing=True.
+        Example:
+            cfg_write(data={"token": "abc123"})
+
+    cfg_build(pdir=None, is_global=False, file_name=None) -> dict
+        Load configuration from disk into a raw dictionary.
+        Automatically bootstraps missing files with a default schema.
+        Example:
+            config = cfg_build()
     """
 
     class Logger:
@@ -748,7 +768,7 @@ class StaticMethods:
             Raises:
                 RuntimeError: If loguru cannot be imported or installed.
             """
-            loguru = sm.try_import("loguru")
+            loguru = StaticMethods.try_import("loguru")
             return loguru.logger
 
         @staticmethod
@@ -872,9 +892,9 @@ class StaticMethods:
                 TypeError: If input types are incorrect.
             """
             log = StaticMethods.log
-            sm.try_import("requests")
-            sm.check_input(url, str, "url")
-            sm.check_input(retries, int, "retries")
+            StaticMethods.try_import("requests")
+            StaticMethods.check_input(url, str, "url")
+            StaticMethods.check_input(retries, int, "retries")
             log.info("Starting GET request", url=url)
 
             # define the single‐try function
@@ -884,7 +904,7 @@ class StaticMethods:
                 return resp
 
             # delegate retry logic
-            return sm.attempt(_do_get, retries=retries)
+            return StaticMethods.attempt(_do_get, retries=retries)
 
         @staticmethod
         def http_post(url: str, data: dict, retries: int = 3) -> requests.Response:
@@ -904,10 +924,10 @@ class StaticMethods:
                 TypeError: If input types are incorrect.
             """
             log = StaticMethods.log
-            sm.try_import("requests")
-            sm.check_input(url, str, "url")
-            sm.check_input(data, dict, "data")
-            sm.check_input(retries, int, "retries")
+            StaticMethods.try_import("requests")
+            StaticMethods.check_input(url, str, "url")
+            StaticMethods.check_input(data, dict, "data")
+            StaticMethods.check_input(retries, int, "retries")
             log.info("Starting POST request", url=url, payload=data)
 
             def _do_post():
@@ -915,7 +935,7 @@ class StaticMethods:
                 resp.raise_for_status()
                 return resp
 
-            return sm.attempt(_do_post, retries=retries)
+            return StaticMethods.attempt(_do_post, retries=retries)
 
     http_get = Requests.http_get
     http_post = Requests.http_post
@@ -930,8 +950,9 @@ class StaticMethods:
         Perform a POST request with JSON payload, retry support, and logging.
     """
 
+StaticMethods.log = StaticMethods.Logger.get_logger() # this is for testing purposes only
 sm = StaticMethods
-StaticMethods.log = StaticMethods.Logger.get_logger()
+log = StaticMethods.Logger.get_logger()
 
 # --------------------
 # Dependency Tests
@@ -1002,7 +1023,7 @@ import json
 import pytest
 from pathlib import Path
 
-PathUtil = sm.PathUtil
+PathUtil = StaticMethods.PathUtil
 
 def test_normalize_path_str(tmp_path):
     s = str(tmp_path / "foo" / "bar.txt")
@@ -1150,160 +1171,334 @@ def test_resolve_pdir_with_path_and_str(tmp_path):
     p2 = StaticMethods.Config._resolve_pdir(str(tmp_path))
     assert isinstance(p2, Path) and p2 == tmp_path
 
+@pytest.fixture
+def config_data():
+    return {
+        "DEBUG": True,
+        "SECRET_KEY": "changeme",
+        "PORT": 8000
+    }
 
-def test_get_config_dir(tmp_path):
-    cfg_dir = StaticMethods.Config._get_config_dir(tmp_path)
-    assert cfg_dir == tmp_path / "config"
-
-
-def test_find_settings_files(tmp_path):
+@pytest.fixture
+def cfg_dir(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
-    # create a mix of files
-    (cfg / "settings.toml").write_text("")
-    (cfg / "settings.yaml").write_text("")
-    (cfg / "config.json").write_text("")
-    (cfg / ".secrets.toml").write_text("")
-    (cfg / ".env").write_text("")
-
-    all_files = StaticMethods.Config._find_settings_files(cfg, is_global=False)
-    # should include all five, in the candidate order
-    expected_all = [
-        str(cfg / "settings.toml"),
-        str(cfg / "settings.yaml"),
-        # settings.yml wasn't created
-        str(cfg / "config.json"),
-        str(cfg / ".secrets.toml"),
-        str(cfg / ".env"),
-    ]
-    assert all_files == expected_all
-
-    public = StaticMethods.Config._find_settings_files(cfg, is_global=True)
-    # filters out dot-started files
-    assert public == [
-        str(cfg / "settings.toml"),
-        str(cfg / "settings.yaml"),
-        str(cfg / "config.json"),
-    ]
+    return cfg
 
 
-def test_bootstrap_default_file(tmp_path):
+def test_txt_write_and_read(cfg_dir):
+    path = cfg_dir / "example.txt"
+    content = "Hello, FileIO!"
+
+    # Write
+    StaticMethods.FileIO.write(path, "txt", {"content": content}, overwrite=True)
+    assert path.exists()
+
+    # Read
+    result = StaticMethods.FileIO.read(path, "txt")
+    assert "content" in result
+    assert result["content"] == content
+
+
+def test_txt_read_missing_file(cfg_dir):
+    path = cfg_dir / "missing.txt"
+    result = StaticMethods.FileIO.read(path, "txt")
+    assert result == {}
+
+
+def test_txt_write_invalid_format_raises(cfg_dir):
+    path = cfg_dir / "bad.txt"
+
+    # Missing 'content' key
+    with pytest.raises(ValueError):
+        StaticMethods.FileIO.write(path, "txt", {"not_content": "oops"}, overwrite=True)
+
+    # Not a dict at all
+    with pytest.raises(ValueError):
+        StaticMethods.FileIO.write(path, "txt", "just a string", overwrite=True)
+
+def test_toml_write_and_read(cfg_dir, config_data):
+    path = cfg_dir / "settings.toml"
+    StaticMethods.FileIO.write(path, "toml", config_data, overwrite=True)
+
+    loaded = StaticMethods.FileIO.read(path, "toml")
+    assert loaded == {"default": config_data}
+
+def test_toml_merge_preserves_existing(cfg_dir):
+    path = cfg_dir / "settings.toml"
+    existing = {"default": {"DEBUG": False, "KEEP": "yes"}}
+    import toml
+    path.write_text(toml.dumps(existing), encoding="utf-8")
+
+    new = {"DEBUG": True, "SECRET_KEY": "new"}
+    StaticMethods.FileIO.write(path, "toml", new, overwrite=False, replace_existing=False)
+
+    result = toml.load(path)["default"]
+    assert result["KEEP"] == "yes"
+    assert result["DEBUG"] is False  # kept existing
+    assert result["SECRET_KEY"] == "new"
+
+def test_toml_merge_replaces(cfg_dir):
+    path = cfg_dir / "settings.toml"
+    import toml
+    path.write_text(toml.dumps({"default": {"A": 1}}), encoding="utf-8")
+
+    StaticMethods.FileIO.write(path, "toml", {"A": 2}, overwrite=False, replace_existing=True)
+    loaded = toml.load(path)["default"]
+    assert loaded["A"] == 2
+
+def test_json_write_and_read(cfg_dir, config_data):
+    path = cfg_dir / "config.json"
+    StaticMethods.FileIO.write(path, "json", config_data, overwrite=True)
+
+    loaded = StaticMethods.FileIO.read(path, "json")
+    assert loaded == {"default": config_data}
+
+def test_env_write_and_read(cfg_dir):
+    path = cfg_dir / ".env"
+    data = {"FOO": "bar", "DEBUG": "true"}
+
+    StaticMethods.FileIO.write(path, "env", data, overwrite=True)
+    loaded = StaticMethods.FileIO.read(path, "env")
+
+    assert loaded["FOO"] == "bar"
+    assert loaded["DEBUG"] == "true"
+
+def test_merge_replaces_values():
+    base = {"A": 1, "B": 2}
+    new = {"B": 99, "C": 3}
+    merged = StaticMethods.FileIO._merge(base, new, replace=True)
+    assert merged == {"A": 1, "B": 99, "C": 3}
+
+def test_merge_preserves_values():
+    base = {"A": 1, "B": 2}
+    new = {"B": 99, "C": 3}
+    merged = StaticMethods.FileIO._merge(base, new, replace=False)
+    assert merged == {"A": 1, "B": 2, "C": 3}
+
+def test_read_unsupported_raises(cfg_dir):
+    path = cfg_dir / "unsupported.ini"
+    path.write_text("some=data")
+    with pytest.raises(ValueError):
+        StaticMethods.FileIO.read(path, "ini")
+
+def test_write_unsupported_raises(cfg_dir, config_data):
+    path = cfg_dir / "unsupported.ini"
+    with pytest.raises(ValueError):
+        StaticMethods.FileIO.write(path, "ini", config_data)
+
+import pytest
+import toml
+import json
+from pathlib import Path
+from mileslib import StaticMethods as sm
+
+@pytest.fixture
+def cfg_dir(tmp_path):
+    path = tmp_path / "config"
+    path.mkdir()
+    return path
+
+def test_config_directory_resolves(cfg_dir):
+    assert StaticMethods.Config._get_config_dir(cfg_dir.parent) == cfg_dir
+
+def test_find_settings_file_priority(cfg_dir):
+    (cfg_dir / "settings.toml").write_text("[default]\n")
+    (cfg_dir / "settings.yaml").write_text("")
+    found = StaticMethods.Config._find_settings_file(cfg_dir)
+    assert found.name == "settings.toml"
+
+def test_find_settings_file_global_filters_dotfiles(cfg_dir):
+    (cfg_dir / ".secrets.toml").write_text("")
+    (cfg_dir / ".env").write_text("")
+    assert StaticMethods.Config._find_settings_file(cfg_dir, is_global=True) is None
+
+def test_build_creates_and_reads_default(cfg_dir):
+    pdir = cfg_dir.parent
+    config = StaticMethods.Config.build(pdir=pdir)
+
+    settings_path = cfg_dir / "settings.toml"
+    print(f"\n[DEBUG] settings.toml contents:\n{settings_path.read_text(encoding='utf-8')}")
+
+    # Updated to reflect nested structure
+    assert config.get("default", {}).get("valid") is True
+
+def test_build_with_custom_filename(cfg_dir):
+    pdir = cfg_dir.parent
+    custom_name = "custom.toml"
+    config = StaticMethods.Config.build(pdir=pdir, file_name=custom_name)
+
+    file_path = cfg_dir / custom_name
+    print(f"\n[DEBUG] {custom_name} contents:\n{file_path.read_text(encoding='utf-8')}")
+
+    assert file_path.exists()
+    assert config["default"]["valid"] is True
+
+def test_config_get_nested_and_default(tmp_path):
     cfg = tmp_path / "config"
     cfg.mkdir()
-    default_path = StaticMethods.Config._bootstrap_default_file(cfg)
-    assert default_path == cfg / "settings.toml"
-    text = default_path.read_text(encoding="utf-8")
-    assert "[default]" in text and "valid = true" in text
+    (cfg / "config.json").write_text(json.dumps({"default": {"a": {"b": 123}}}))
 
-    # calling again should not overwrite or error
-    before = default_path.stat().st_mtime
-    dp2 = StaticMethods.Config._bootstrap_default_file(cfg)
-    assert dp2 == default_path
-    assert default_path.stat().st_mtime == before
+    assert StaticMethods.Config.get("a", "b", pdir=tmp_path) == 123
+    assert StaticMethods.Config.get("x", pdir=tmp_path, default="fallback") == "fallback"
 
+    with pytest.raises(RuntimeError):
+        StaticMethods.Config.get("a", "b", pdir=tmp_path, expected=999)
 
-def test_build_creates_and_loads_default(tmp_path):
-    # build on empty tmp_path should create config dir + default file
-    cfg_obj = StaticMethods.Config.build(tmp_path, is_global=False)
-    # dynaconf should load the [default] valid = true
-    assert hasattr(cfg_obj, "valid") and cfg_obj.valid is True
+def test_config_require_valid_and_invalid(tmp_path, monkeypatch):
+    monkeypatch.setattr(StaticMethods.Config, "REQUIRED_KEYS", ["x", "y"], raising=False)
+    monkeypatch.setattr(StaticMethods.Config, "DENYLIST", ["bad"], raising=False)
 
-    # ensure the config directory and file exist
-    cfg_dir = tmp_path / "config"
-    assert cfg_dir.exists() and cfg_dir.is_dir()
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / "config.json").write_text(json.dumps({"default": {"x": 1, "y": "bad"}}))
+
+    with pytest.raises(RuntimeError) as exc:
+        StaticMethods.Config.require(["y"], root=None, pdir=tmp_path)
+    assert "Invalid" in str(exc.value)
+
+    with pytest.raises(RuntimeError) as exc:
+        StaticMethods.Config.require(["z"], root=None, pdir=tmp_path)
+    assert "Missing" in str(exc.value)
+
+def test_write_overwrites_toml(cfg_dir):
+    path = cfg_dir.parent
+    StaticMethods.Config.write(pdir=path, file_name="settings.toml", data={"valid": True}, overwrite=True)
     assert (cfg_dir / "settings.toml").exists()
 
 
-def test_build_with_user_config(tmp_path):
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
+def test_write_merges_preserves_existing(cfg_dir):
+    path = cfg_dir.parent
+    f = cfg_dir / "settings.toml"
+    f.write_text("[default]\nKEEP='yes'\n", encoding="utf-8")
+    StaticMethods.Config.write(pdir=path, data={"valid": True}, overwrite=False, replace_existing=False)
+    parsed = toml.load(f)
+    assert parsed["default"].get("KEEP") == "yes"
 
-    # NOTE the "default" top-level key
-    data = {
-        "default": {
-            "env": {"foo": "bar"},
-            "top": 123
-        }
-    }
-    (cfg_dir / "config.json").write_text(json.dumps(data))
 
-    cfg_obj = StaticMethods.Config.build(tmp_path, is_global=False)
+def test_write_merges_replaces_existing(cfg_dir):
+    path = cfg_dir.parent
+    f = cfg_dir / "settings.toml"
+    f.write_text("[default]\nfoo='bar'\n")
+    StaticMethods.Config.write(pdir=path, data={"foo": "baz"}, overwrite=False, replace_existing=True)
+    parsed = toml.load(f)
+    assert parsed["default"].get("foo") == "baz"
 
-    # now these both work
-    assert StaticMethods.Config.get("top", pdir=tmp_path) == 123
-    assert StaticMethods.Config.get("env", "foo", pdir=tmp_path) == "bar"
 
-def test_get_happy_missing_and_expected_mismatch(tmp_path):
-    # prepare a JSON config that Dynaconf will load under the 'default' env
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
-    data = {
-        "default": {
-            "env": {"a": 1},
-            "b": 2
-        }
-    }
-    (cfg_dir / "config.json").write_text(json.dumps(data))
+def test_write_replaces_file_completely(cfg_dir):
+    path = cfg_dir.parent
+    f = cfg_dir / "settings.toml"
+    f.write_text("[default]\nremove='this'\n")
+    StaticMethods.Config.write(pdir=path, data={"clean": True}, overwrite=True)
+    parsed = toml.load(f)
+    assert "remove" not in parsed["default"]
+    assert parsed["default"].get("clean") is True
 
-    # existing nested key
-    assert StaticMethods.Config.get("env", "a", pdir=tmp_path) == 1
-    # top-level key inside 'default'
-    assert StaticMethods.Config.get("b", pdir=tmp_path) == 2
-    # missing with default
-    assert StaticMethods.Config.get("nope", pdir=tmp_path, default=999) == 999
+Logger = StaticMethods.Logger
 
-    # expected mismatch triggers RuntimeError
-    with pytest.raises(RuntimeError) as exc:
-        StaticMethods.Config.get("env", "a", pdir=tmp_path, expected=2)
-    assert "[Config.get]" in str(exc.value)
+@pytest.fixture(autouse=True)
+def reset_logger_after_test():
+    yield
+    Logger.reset_logger()
 
-def test_require_success_missing_and_invalid(tmp_path, monkeypatch):
-    # limit REQUIRED_KEYS for the test
-    monkeypatch.setattr(StaticMethods.Config, "REQUIRED_KEYS", ["foo", "bar"], raising=False)
+def test_logger_resets_state():
+    Logger._configured = True
+    Logger._current_log_path = Path("fake.log")
+    Logger._logger = object()
 
-    # write JSON under the "default" env so Dynaconf picks it up
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
-    data = {
-        "default": {
-            "foo": 1,
-            "bar": "bad"
-        }
-    }
-    (cfg_dir / "config.json").write_text(json.dumps(data))
+    Logger.reset_logger()
 
-    # 1) OK when denylist does not include "bad"
-    monkeypatch.setattr(StaticMethods.Config, "DENYLIST", ["changeme", ""], raising=False)
-    assert StaticMethods.Config.require(["foo", "bar"], root=None, pdir=tmp_path) is True
+    assert Logger._configured is False
+    assert Logger._current_log_path is None
+    assert Logger._logger is None
 
-    # 2) missing key triggers RuntimeError
-    with pytest.raises(RuntimeError) as exc_m:
-        StaticMethods.Config.require(["foo", "baz"], root=None, pdir=tmp_path)
-    assert "Missing" in str(exc_m.value)
+from loguru import logger as loguru_logger
 
-    # 3) bad value in denylist triggers RuntimeError
-    monkeypatch.setattr(StaticMethods.Config, "DENYLIST", ["bad"], raising=False)
-    with pytest.raises(RuntimeError) as exc_b:
-        StaticMethods.Config.require(["bar"], root=None, pdir=tmp_path)
-    assert "Invalid" in str(exc_b.value)
+def test_logger_init_creates_log_file(tmp_path):
+    logger = Logger.init_logger(log_dir=tmp_path, label="testlog", serialize=False)
 
-def test_exists_and_to_dict_and_dump(tmp_path, capsys):
-    # write JSON under the "default" environment
-    cfg_dir = tmp_path / "config"
-    cfg_dir.mkdir()
-    data = {"default": {"x": 111}}
-    (cfg_dir / "config.json").write_text(json.dumps(data))
+    assert Logger._configured is True
+    assert isinstance(Logger._current_log_path, Path)
+    assert Logger._current_log_path.exists()
 
-    # now exists() will see "x"
-    assert StaticMethods.Config.exists("x", pdir=tmp_path) is True
-    assert StaticMethods.Config.exists("nope", pdir=tmp_path) is False
+    # Write and flush a log message
+    logger.info("Test log message")
+    loguru_logger.complete()  # force background logging to finish
 
-    # to_dict() should expose the same value
-    d = StaticMethods.Config.to_dict(pdir=tmp_path)
-    assert isinstance(d, dict) and d.get("x") == 111
+    contents = Logger._current_log_path.read_text(encoding="utf-8")
+    assert isinstance(contents, str)
+    assert "Test log message" in contents
 
-    # dump() prints it out as JSON
-    StaticMethods.Config.dump(pdir=tmp_path)
-    out = capsys.readouterr().out.strip()
-    parsed = json.loads(out)
-    assert parsed.get("x") == 111
+def test_logger_reuses_existing_logger(tmp_path):
+    logger1 = Logger.init_logger(log_dir=tmp_path, label="one", serialize=False)
+    path1 = Logger._current_log_path
+
+    logger2 = Logger.init_logger(log_dir=tmp_path, label="two", serialize=False)
+    path2 = Logger._current_log_path
+
+    assert logger1 is logger2
+    assert path1 == path2  # still using original log path
+
+def test_get_logger_auto_initializes(tmp_path, monkeypatch):
+    monkeypatch.setattr(Logger, "_configured", False)
+
+    # Set default log directory to tmp_path for isolation
+    monkeypatch.setattr(sm, "ensure_path", lambda path, is_file=False, create=True: (tmp_path, None))
+
+    logger = Logger.get_logger()
+    assert Logger._configured is True
+    assert Logger._logger is not None
+
+def test_get_loguru_errors_if_not_initialized(monkeypatch):
+    monkeypatch.setattr(Logger, "_configured", False)
+    with pytest.raises(RuntimeError, match="Logger has not been initialized"):
+        Logger.get_loguru()
+
+def test_try_import_loguru_returns_logger():
+    loguru_logger = Logger.try_import_loguru()
+    assert hasattr(loguru_logger, "info")
+    assert hasattr(loguru_logger, "debug")
+
+def test_http_get_success(requests_mock):
+    url = "https://example.com/data"
+    requests_mock.get(url, text="OK", status_code=200)
+
+    resp = StaticMethods.Requests.http_get(url)
+    assert resp.status_code == 200
+    assert resp.text == "OK"
+
+def test_http_post_success(requests_mock):
+    url = "https://example.com/post"
+    payload = {"key": "value"}
+    requests_mock.post(url, json={"result": "ok"}, status_code=200)
+
+    resp = StaticMethods.Requests.http_post(url, data=payload)
+    assert resp.status_code == 200
+    assert resp.json() == {"result": "ok"}
+
+def test_http_get_invalid_url_type():
+    with pytest.raises(TypeError):
+        StaticMethods.Requests.http_get(12345)
+
+def test_http_post_invalid_data_type():
+    with pytest.raises(TypeError):
+        StaticMethods.Requests.http_post("https://example.com", data="not a dict")
+
+def test_http_get_retries_on_failure(requests_mock):
+    url = "https://example.com/retry"
+    requests_mock.get(url, status_code=500)
+
+    with pytest.raises(Exception):  # requests.HTTPError or general depending on StaticMethods.attempt
+        StaticMethods.Requests.http_get(url, retries=2)
+
+    assert requests_mock.call_count == 2  # total attempts, not retries + 1
+
+def test_http_post_retries_on_failure(requests_mock):
+    url = "https://example.com/fail"
+    payload = {"x": 1}
+    requests_mock.post(url, status_code=502)
+
+    with pytest.raises(Exception):
+        StaticMethods.Requests.http_post(url, data=payload, retries=2)
+
+    assert requests_mock.call_count == 2  # total attempts (NOT 2 + 1)
