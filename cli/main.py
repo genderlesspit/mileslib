@@ -1,8 +1,12 @@
 # mileslib/cli/main.py
 import click
-from mileslib import (
-    MilesLib, StaticMethods as sm
-)
+import sys
+from pathlib import Path
+# Add project root to sys.path manually
+sys.path.append(str(Path(__file__).resolve().parents[2]))
+
+from mileslib import sm, log
+
 from cli.commands import init_project as init
 from cli.commands import render_test_boilerplate as test
 from cli.commands import render_cli_boilerplate as cmdgn
@@ -18,11 +22,9 @@ from cli.commands import render_cli_boilerplate as cmdgn
 @click.option("--deps", is_flag=True, help="Show Dependency aliases help.")
 @click.option("--error", is_flag=True, help="Show ErrorHandling aliases help.")
 @click.option("--paths", is_flag=True, help="Show Path aliases help.")
-@click.pass_context
 def cli(ctx, show_help, config, logger, requests, deps, error, paths):
     """MilesLib CLI for initializing projects and generating test/CLI stubs."""
     ctx.ensure_object(dict)
-    ctx.obj["miles"] = MilesLib()
 
     if ctx.invoked_subcommand is None and show_help:
         click.echo(ctx.get_help())

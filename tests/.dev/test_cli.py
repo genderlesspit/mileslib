@@ -1,399 +1,381 @@
-from typing import Iterator
-import pytest
+# core.py
 import os
-from staticmethods import StaticMethods as sm
+import click
+import subprocess
+import shutil
 from pathlib import Path
-
-### Static Methods ###
-"""
-StaticMethods Utility Module
-============================
-
-This internal utility classname (`StaticMethods`) provides static helper methods used throughout
-MilesLib components to enforce type validation, file/directory sanity, instance hygiene,
-dependency checking, retry logic, and logging-safe operations.
-
-It is intended as a reusable drop-in for backend classes that need consistent, testable
-validation and runtime behavior without requiring stateful inheritance.
-
-Methods Overview
-----------------
-
-1. check_input(arg, expected, label):
-    - Raises TypeError if `arg` is not of the expected type(s).
-    - Ideal for validating arguments in public methods.
-
-2. restart(self):
-    - Forcefully restarts the running Python process.
-    - Use only for CLI scripts or daemon-style workers.
-
-3. exists(path, disp, quiet, create_if_missing):
-    - Checks for file or directory existence.
-    - Optionally creates missing paths if requested.
-    - Logs outcome unless `quiet` is True.
-
-4. dependency(dep, pack):
-    - Ensures a pip dependency is installed.
-    - Automatically installs if missing (.dev-safe, not production-safe).
-
-5. timer(fn, *args, **kwargs):
-    - Times execution duration of a function call.
-    - Returns both result and duration.
-
-6. recall(fn, max_attempts, handled_exceptions):
-    - Retries a function multiple times on failure.
-    - Raises the last exception after exhausting retries.
-    - Useful for unstable I/O or API endpoints.
-
-7. traverse_dictionary(data, *keys, default):
-    - Traverses nested dictionaries/lists safely.
-    - Supports mixed key/index access with graceful fallback.
-
-8. validate_instance(inst):
-    - Ensures an object is not None and is classname-like.
-    - Rejects primitives and empty placeholders.
-
-9. validate_instance_directory(pdir):
-    - Ensures `.pdir` on an instance is a valid existing Path.
-    - Accepts str or Path.
-
-10. validate_directory(path):
-    - Ensures a directory exists; creates it if not.
-    - Raises if path exists but is not a directory.
-
-11. validate_file(path):
-    - Ensures a file exists.
-    - Raises if missing or if the path is a directory.
-
-12. ensure_file_with_default(path, default, encoding):
-    - Creates a file if missing or empty and writes a default (str or JSON).
-    - Raises if the default is not string-like or dict.
-
-Usage Pattern
--------------
-In consuming classes like `Config`, `Logger`, `TaskRunner`, etc., methods from this classname
-should be accessed via dependency injection like:
-
-    classname Config:
-        def __init__(self, inst):
-            self.m = inst
-            self.sm = inst.sm
-
-        def load(self):
-            self.sm.check_input(self.path, str, label="Config path")
-            ...
-
-You should **never instantiate StaticMethods** — it is purely a namespace for reusable logic.
-
-"""
-
-### Script ###
-
-class test_Main:
-    def __init__(self, pdir = None):
-        '''
-        Parent instance of CLI.
-        :param pdir: Project directory, usually os.getcwd(), unless specified by config files.
-        '''
-        pdir = pdir or os.getcwd()
-        self.pdir = sm.validate_instance_directory(pdir=pdir)
+from mileslib import StaticMethods as sm
 
 class CLI:
-    def __init__(self, inst):
+    """
+    Command-line interface handler for MilesLib commands.
+
+    Methods:
+        launch(): Starts the CLI command group.
+    """
+    def __init__(self):
         """
-        CLI operates on a passed-in test_Main instance.
-        :param inst Argument for instance passed through the classname.
+        Initialize the CLI with command registration.
         """
-        sm.validate_instance(inst=inst)
-        self.m = inst
-        self.pdir = self.m.pdir
+        self.cli = click.Group(
+            invoke_without_command=True,
+            context_settings={"help_option_names": ["--help", "-h"]}
+        )
+        self._register_commands()
 
-        # Directory Initialization
-        self.class_dir = self.pdir / "CLI"
-        sm.validate_directory(self.class_dir)
-
-        #ID
-        self._id = self.pdir.name
-
-        #Contents
-        self.contents = list(self.pdir.iterdir())
-
-    ### Dynamic Methods ###
-    def dynamic_method(self, arg):
+    def launch(self):
         """
-        Placeholder dynamic method.
-        - Uses instance state (`self`)
+        Launch the CLI group. Entry point for CLI execution.
         """
-        return arg
+        self.cli()
 
-    ### CLI Methods ###
-    @classmethod
-    def class_method(cls):
+    def _register_commands(self):
         """
-        Placeholder classname method.
-        - Uses classname reference (`cls`)
+        Register all subcommands to the CLI group.
         """
-        return cls.__name__
+        self.cli.add_command(self.CMDs.run_setup)
+        self.cli.add_command(self.CMDs.run_init)
 
-    ### Static Methods ###
-    @staticmethod
-    def static_method(arg):
-        """
-        Placeholder static method.
-        - Stateless; does not use `self` or `cls`
-        """
-        return arg
+    class CMDs:
+        #RUN SETUP
+        @staticmethod
+        @click.command(name="setup")
+        @click.option(
+            "--root",
+            type=click.Path(file_okay=False, dir_okay=True),
+            default=".",
+            show_default=True,
+            help="Root directory to initialize MilesLib in.",
+        )
+        def run_setup(root):
+            """
+            Set up the MilesLib root directory and configuration file.
 
-    def __repr__(self) -> str:
-        """
-        Return the official representation of the object for debugging.
+            Args:
+                root (str): Path to the desired root directory.
 
-        Example:
-            <Boilerplate path='/home/user/project'>
-        """
-        return f"<{self.__class__.__name__} path='{self.class_dir}'>"
+            Side Effects:
+                Creates `_config/mileslib_config.toml` and sets Directory.absolute_path.
 
-    def __str__(self) -> str:
-        """
-        Return a human-readable string describing the object.
+            Raises:
+                click.Abort: If setup fails due to a validation or filesystem error.
+            """
+            try:
+                root_path = Path(root).resolve()
+                Directory(root_path)
+                click.echo(f"[setup] MilesLib initialized at: {root_path}")
+            except Exception as e:
+                click.echo(f"[error] Failed to initialize MilesLib: {e}")
+                raise click.Abort()
 
-        Example:
-            Boilerplate at '/home/user/project' with 5 items
-        """
-        return f"{self.__class__.__name__} at '{self.class_dir}' with {len(self)} items"
+        #RUN INITIALIZATION
+        @staticmethod
+        @click.command(name="init")
+        @click.argument("project_name")
+        def run_init(project_name):
+            """
+            Initialize a new MilesLib-compatible project under the current root.
 
-    def __bool__(self) -> bool:
-        """
-        Return True if the backing directory exists and is valid.
+            Args:
+                project_name (str): Name of the new project directory to create.
 
-        Enables:
-            if obj: ...
-        """
-        return self.class_dir.exists() and self.class_dir.is_dir()
+            Raises:
+                RuntimeError: If MilesLib root is not initialized.
+            """
+            try:
+                CLI.Methods.init_project(project_name)
+            except RuntimeError as e:
+                click.echo(str(e))
+                raise click.Abort()
 
-    def __eq__(self, other: object) -> bool:
-        """
-        Check if two CLI instances point to the same directory.
+    class Methods:
+        @staticmethod
+        def init_project(project_name: str):
+            """
+            Create a new project folder with default structure and Django scaffold.
 
-        Returns:
-            bool: True if same type and same path.
-        """
-        return isinstance(other, CLI) and self.class_dir == other.class_dir
+            Args:
+                project_name (str): Name of the project to be created.
 
-    def __len__(self) -> int:
-        """
-        Return the number of files/subdirs inside the directory.
+            Side Effects:
+                - Creates folders: _config, _tests, _logs, .tmp
+                - Writes a default settings.toml config file
+                - Runs `django-admin startproject`
 
-        Returns:
-            int: Number of immediate entries in the path.
-        """
-        return len(self.contents)
+            Raises:
+                RuntimeError: If root is not initialized.
+                subprocess.CalledProcessError: If Django project creation fails.
+            """
+            Directory.is_initialized()
+            root = Directory.absolute_path / project_name
+            cfg = root / "_config"
+            tests = root / "_tests"
+            logs = root / "_logs"
+            tmp = root / ".tmp"
 
-    def __contains__(self, filename: str) -> bool:
-        """
-        Check if a file with the given name exists inside the directory.
+            try:
+                click.echo(f"[init] Creating directories for '{project_name}'...")
+                for d in [root, cfg, tests, logs, tmp]:
+                    sm.validate_directory(d)
 
-        Args:
-            filename (str): Name to check for (not full path).
+                click.echo("[init] Writing default configuration...")
+                sm.cfg_write(
+                    pdir=root,
+                    file_name="settings.toml",
+                    data={
+                        "valid": True,
+                        "project": project_name,
+                        "env": {"active": "default"},
+                        "paths": {
+                            "config": str(cfg),
+                            "logs": str(logs),
+                            "tmp": str(tmp)
+                        }
+                    },
+                    overwrite=False,
+                    replace_existing=False
+                )
 
-        Returns:
-            bool: True if file exists by name.
-        """
-        return any(f.name == filename for f in self.contents)
+                click.echo("[init] Initializing Django project...")
+                subprocess.run(
+                    ["python", "-m", "django", "startproject", project_name, str(root)],
+                    check=True
+                )
 
-    def __getitem__(self, index: int) -> Path:
-        """
-        Allow indexed access to contents (like a list).
-
-        Args:
-            index (int): Position in the contents list.
-
-        Returns:
-            Path: File or directory at that position.
-        """
-        return self.contents[index]
-
-    def __iter__(self) -> Iterator[Path]:
-        """
-        Make the object iterable over its contents.
-
-        Returns:
-            Iterator[Path]: Iterator over Path objects inside pdir.
-        """
-        return iter(self.contents)
-
-    def refresh(self) -> None:
-        """
-        Reload the contents from disk.
-        Use after files have changed outside the object context.
-        """
-        self.contents = list(self.class_dir.iterdir())
-
-### Fixtures ###
-
-"""
-Default Fixtures Overview
-=========================
-
-These fixtures are used across multiple unit tests to simulate edge cases,
-provide generic inputs, and validate error handling across modules like Config,
-Logger, and other MilesLib components.
-
-Each fixture returns a specific object or value type for TDD-oriented testing.
-
-Fixtures
---------
-
-1. broken_directory:
-    - Simulates a syntactically invalid directory string.
-    - Used to test path validation and error handling in init routines.
-
-2. broken_main_directory:
-    - Returns an instance with a broken pdir attribute set to a corrupt path.
-    - Triggers FileNotFoundError or path-based logic errors during instantiation.
-
-3. sample_string:
-    - A basic lowercase string for text-based logic and transformations.
-    - Useful for testing string methods, formatting, or casing.
-
-4. sample_object:
-    - Dummy classname with a single `.value = 42` attribute.
-    - Used to test generic object attribute access or mocking.
-
-5. sample_tuple:
-    - Tuple of (int, str, float): `(1, "two", 3.0)`.
-    - Useful for unpacking, type validation, or multi-type logic testing.
-
-6. missing_file_path:
-    - A `Path` object pointing to a guaranteed missing file in a temp directory.
-    - Use to test FileNotFoundError, fallback logic, or safe file access.
-
-7. broken_instance:
-    - Object that raises `AttributeError` for any accessed attribute.
-    - Validates code paths that assume attribute presence or introspection.
-
-8. numeric_values:
-    - Includes edge-case numbers: `0`, `-1`, `1`, `3.14`, `inf`, `-inf`, `nan`.
-    - Useful for range checking, float safety, and math edge case handling.
-
-9. falsy_values:
-    - Includes Python's core falsy values: `None`, `False`, `0`, `""`, `[]`, `{}`, `set()`.
-    - Helps verify truthiness assumptions and guard logic.
-
-10. non_string_keys:
-    - Returns non-str types commonly used incorrectly as dict keys:
-      `int`, `None`, `bool`, `float`, `tuple`, `object`.
-    - Tests dict key validation or serialization constraints.
-"""
+            except Exception as e:
+                click.echo(f"[error] {project_name} initialization failed!: {e}")
+                if root.exists():
+                    shutil.rmtree(root)
+                click.echo("[abort] Setup aborted.")
+                exit(1)
+import pytest
+import shutil
+import subprocess
+from pathlib import Path
+from click.testing import CliRunner
 
 @pytest.fixture
-def temp_CLI(tmp_path):
-    """Creates a CLI instance with a temporary directory."""
-    main = test_Main(pdir=tmp_path)
-    instance = CLI(inst=main)
-    return instance
+def clean_dir(tmp_path):
+    yield tmp_path
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
 
-def test_repr_returns_expected_string(temp_CLI):
-    result = repr(temp_CLI)
-    assert result.startswith("<CLI path='")
-    assert str(temp_CLI.class_dir) in result
+def test_directory_is_initialized_after_setup(monkeypatch, clean_dir):
+    monkeypatch.setattr(sm, "validate_directory", lambda p: Path(p))
+    monkeypatch.setattr(sm, "validate_file", lambda p: Path(p))
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(sm, "cfg_write", lambda **kwargs: None)
 
-def test_str_returns_human_readable(temp_CLI):
-    expected_prefix = f"CLI at '{temp_CLI.class_dir}' with"
-    assert str(temp_CLI).startswith(expected_prefix)
+    Directory(clean_dir)
 
-def test_bool_true_when_valid_dir(temp_CLI):
-    assert bool(temp_CLI) is True
-
-def test_bool_false_when_path_deleted(tmp_path):
-    main = test_Main(pdir=tmp_path)
-    instance = CLI(inst=main)
-    instance.class_dir.rmdir()
-    assert bool(instance) is False
-
-def test_eq_same_path_same_object(tmp_path):
-    main1 = test_Main(pdir=tmp_path)
-    main2 = test_Main(pdir=tmp_path)
-    c1 = CLI(inst=main1)
-    c2 = CLI(inst=main2)
-    assert c1 == c2
+    assert Directory.is_initialized() is True
 
 
-def test_eq_different_path_objects(tmp_path):
-    path_a = tmp_path / "a"
-    path_b = tmp_path / "b"
-    path_a.mkdir()
-    path_b.mkdir()
+def test_cli_setup_creates_root(monkeypatch, clean_dir):
+    """Test CLI 'setup' command initializes Directory."""
+    runner = CliRunner()
+    Directory.absolute_path = None
+    Directory.setup_complete = False
 
-    main1 = test_Main(pdir=path_a)
-    main2 = test_Main(pdir=path_b)
-    c1 = CLI(inst=main1)
-    c2 = CLI(inst=main2)
+    print(f"\n[DEBUG] Using clean_dir: {clean_dir}")
 
-    assert c1 != c2
+    monkeypatch.setattr(sm, "validate_directory", lambda p: Path(p))
+    monkeypatch.setattr(sm, "validate_file", lambda p: Path(p))
+    monkeypatch.setattr(sm, "cfg_write", lambda **kwargs: print(f"[DEBUG] cfg_write called with: {kwargs}"))
 
-def test_len_counts_files_correctly(temp_CLI):
-    temp_CLI.refresh()  # Ensure accurate baseline
-    initial_count = len(temp_CLI)
+    cli = CLI().cli
+    result = runner.invoke(cli, ["setup", "--root", str(clean_dir)])
 
-    (temp_CLI.class_dir / "file1.txt").write_text("A")
-    (temp_CLI.class_dir / "file2.txt").write_text("B")
-    temp_CLI.refresh()
+    print(f"[DEBUG] CLI Output:\n{result.output}")
+    print(f"[DEBUG] Exit Code: {result.exit_code}")
+    print(f"[DEBUG] Directory.absolute_path: {Directory.absolute_path}")
+    print(f"[DEBUG] Directory.setup_complete: {Directory.setup_complete}")
 
-    expected = initial_count + 2
-    assert len(temp_CLI) == expected
+    assert result.exit_code == 0
+    assert "[setup] MilesLib initialized at" in result.output
+    assert Directory.absolute_path == clean_dir
+    assert Directory.setup_complete is True
 
-def test_contains_checks_file_by_name(temp_CLI):
-    (temp_CLI.class_dir / "testfile.txt").write_text("data")
-    temp_CLI.refresh()
-    assert "testfile.txt" in temp_CLI
-    assert "nonexistent.txt" not in temp_CLI
+def test_cli_init_project(monkeypatch, clean_dir):
+    """Test CLI 'init' command scaffolds project when root is set."""
+    runner = CliRunner()
+    Directory.absolute_path = clean_dir  # manually simulate setup
 
-def test_getitem_returns_path_by_index(temp_CLI):
-    file1 = temp_CLI.class_dir / "file1.txt"
-    file2 = temp_CLI.class_dir / "file2.txt"
-    file1.write_text("one")
-    file2.write_text("two")
-    temp_CLI.refresh()
-    assert temp_CLI[0].name in {"file1.txt", "file2.txt"}
-    assert isinstance(temp_CLI[0], Path)
+    monkeypatch.setattr(sm, "validate_directory", lambda p: Path(p))
+    monkeypatch.setattr(sm, "cfg_write", lambda **kwargs: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: None)
 
-def test_iter_yields_all_contents(temp_CLI):
-    files = ["a.txt", "b.txt", "c.txt"]
-    for name in files:
-        (temp_CLI.class_dir / name).write_text("data")
-    temp_CLI.refresh()
-    names = [f.name for f in temp_CLI]
-    for name in files:
-        assert name in names
+    cli = CLI().cli
+    result = runner.invoke(cli, ["init", "demo_proj"])
 
-def test_refresh_updates_internal_file_list(temp_CLI):
-    temp_CLI.refresh()  # Ensure contents is accurate
-    initial_count = len(temp_CLI)
-
-    new_file = temp_CLI.class_dir / "new.txt"
-    new_file.write_text("added later")
-
-    temp_CLI.refresh()
-    assert len(temp_CLI) == initial_count + 1
-    assert "new.txt" in temp_CLI
-
-### Tests for Method ###
-
-def test_dynamic_method_returns_argument(temp_CLI):
-    """Ensure dynamic_method echoes the input value using instance."""
-    assert temp_CLI.dynamic_method("value") == "value"
-    assert temp_CLI.dynamic_method(123) == 123
+    assert result.exit_code == 0
+    assert "[init] Creating directories for 'demo_proj'" in result.output
+    assert "[init] Writing default configuration..." in result.output
+    assert "[init] Initializing Django project..." in result.output
 
 
-def test_class_method_returns_class_name():
-    """Ensure class_method returns the name of the classname as a string."""
-    result = CLI.class_method()
-    assert isinstance(result, str)
-    assert result == "CLI"
+def test_cli_init_without_setup(monkeypatch):
+    """Test that 'init' fails if Directory is not initialized."""
+    runner = CliRunner()
+    Directory.absolute_path = None  # simulate missing setup
+    Directory.setup_complete = False
+
+    print("\n[DEBUG] Simulating uninitialized Directory")
+    cli = CLI().cli
+    result = runner.invoke(cli, ["init", "failing_proj"])
+
+    print(f"[DEBUG] CLI Output:\n{result.output}")
+    print(f"[DEBUG] Exit Code: {result.exit_code}")
+    print(f"[DEBUG] Directory.absolute_path: {Directory.absolute_path}")
+    print(f"[DEBUG] Directory.setup_complete: {Directory.setup_complete}")
+
+    assert result.exit_code != 0
+    assert "MilesLib root not initialized" in result.output
 
 
-def test_static_method_returns_argument():
-    """Ensure static_method echoes the input value."""
-    assert CLI.static_method("static") == "static"
-    assert CLI.static_method(42) == 42
+class Directory:
+    """
+    Handles root directory validation, configuration setup, and global project state.
+
+    Attributes:
+        setup_complete (bool): Indicates whether initialization has completed.
+        absolute_path (Path): The validated root directory of the MilesLib project.
+    """
+    setup_complete = False
+    absolute_path = None
+
+    def __init__(self, root: Path = None):
+        """
+        Initialize the Directory object and set up the core configuration structure.
+
+        Args:
+            root (Path, optional): Custom root path. Defaults to current working directory.
+
+        Raises:
+            ValueError: If the directory or config file cannot be created or validated.
+        """
+        self.root = sm.validate_directory((root or os.getcwd()).resolve())
+        Directory.absolute_path = self.root
+        self.config_name = "mileslib_config.toml"
+        self.config_dir = sm.validate_directory(self.root / "_config")
+        self.config_path = sm.validate_file(self.config_dir / self.config_name )
+        if not self.config_path.exists():
+            sm.cfg_write(
+                pdir=self.root,
+                file_name=self.config_name,
+                data={
+                    "valid": True,
+                    "absolute_root": f"{self.root}",
+                    "active_projects": {
+                    }
+                },
+                overwrite=False,
+                replace_existing=False
+            )
+        Directory.setup_complete = True
+
+    @staticmethod
+    def is_initialized() -> bool:
+        """
+        Check if the MilesLib root directory has been initialized.
+
+        Returns:
+            bool: True if initialized.
+
+        Raises:
+            RuntimeError: If the root has not been set up yet.
+        """
+        if Directory.absolute_path is None:
+            raise RuntimeError(
+                "MilesLib root not initialized. Run `mileslib setup` to initialize the project root."
+            )
+        return True
+
+#IS_INITIALIZED = Directory.is_initialized()
+ABSOLUTE_PATH = Directory.absolute_path
+DIRECTORY_USAGE = """
+MilesLib Directory Constants
+----------------------------
+
+• IS_INITIALIZED
+    → bool: True if MilesLib root has been initialized via Directory().
+    → Raises RuntimeError if accessed before initialization.
+    → Alias: Directory.is_initialized()
+
+• ABSOLUTE_PATH
+    → Path: The absolute root directory of the current MilesLib project.
+    → Set automatically during Directory() instantiation.
+    → Alias: Directory.absolute_path
+"""
+
+import os
+import shutil
+import pytest
+from pathlib import Path
+from mileslib import StaticMethods as sm
+
+@pytest.fixture
+def clean_dir(tmp_path):
+    """Temporary clean directory to simulate project root."""
+    yield tmp_path
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+
+def test_directory_initializes_config(monkeypatch, clean_dir):
+    """Test that Directory sets up root and creates the config if missing."""
+    captured = {}
+
+    monkeypatch.setattr(sm, "validate_directory", lambda p: Path(p))
+    monkeypatch.setattr(sm, "validate_file", lambda p: Path(p))
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(sm, "cfg_write", lambda **kwargs: captured.update(kwargs))
+
+    Directory(clean_dir)
+
+    assert Directory.setup_complete is True
+    assert Directory.absolute_path == clean_dir
+    assert captured["pdir"] == clean_dir
+    assert captured["file_name"] == "mileslib_config.toml"
+    assert "data" in captured
+    assert captured["data"]["valid"] is True
+
+def test_directory_skips_cfg_write_if_exists(monkeypatch, clean_dir):
+    """Ensure cfg_write is not called if config file exists."""
+
+    # Save original before patching
+    original_exists = Path.exists
+
+    monkeypatch.setattr(sm, "validate_directory", lambda p: Path(p))
+    monkeypatch.setattr(sm, "validate_file", lambda p: Path(p))
+
+    expected = Path(clean_dir / "_config" / "mileslib_config.toml")
+
+    def fake_exists(self):
+        if self == expected:
+            return True
+        return original_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    called = {"written": False}
+
+    def fake_write(**kwargs):
+        called["written"] = True
+
+    monkeypatch.setattr(sm, "cfg_write", fake_write)
+
+    Directory(clean_dir)
+
+    assert called["written"] is False
+
+def test_is_initialized_true(monkeypatch, clean_dir):
+    """Check that is_initialized returns True if root is set."""
+    Directory.absolute_path = clean_dir
+    assert Directory.is_initialized() is True
+
+
+def test_is_initialized_false_raises():
+    """Check that is_initialized raises RuntimeError if root not set."""
+    Directory.absolute_path = None
+    with pytest.raises(RuntimeError, match="MilesLib root not initialized"):
+        Directory.is_initialized()

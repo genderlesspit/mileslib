@@ -50,6 +50,7 @@ python mileslib.py render MyClass
 
 ```python
 from mileslib import MilesLib
+
 ml = MilesLib()
 ml.logger.info("Logger is working")
 ```

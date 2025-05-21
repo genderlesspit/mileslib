@@ -1,3 +1,5 @@
+import os
+
 import click
 from jinja2 import Environment, FileSystemLoader
 import pytest
@@ -14,8 +16,7 @@ import tempfile
 @click.pass_context
 def run(ctx, command_name, args, opt, docstring):
     miles = ctx.obj["miles"]
-    logger = miles.logger
-    pdir = miles.pdir
+    pdir = os.getcwd()
 
     options = []
     for o in opt:
@@ -48,7 +49,6 @@ def run(ctx, command_name, args, opt, docstring):
     cli_path = out_dir / f"cli_{command_name}.py"
     cli_path.write_text(cli_code, encoding="utf-8")
 
-    logger.info("Generated CLI + embedded test", extra={"command": command_name})
     click.echo(f"CLI with test written to: {cli_path}")
 
 @pytest.fixture
