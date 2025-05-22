@@ -581,7 +581,8 @@ class StaticMethods:
             """
             candidates = [
                 "settings.toml", "settings.yaml", "settings.yml",
-                "config.json", ".secrets.toml", ".secrets.yaml", ".env"
+                "config.json", ".secrets.toml", ".secrets.yaml", ".env",
+                "mileslib_config.toml"
             ]
             if is_global:
                 candidates = [f for f in candidates if not f.startswith(".")]
@@ -1021,23 +1022,6 @@ class Directory:
         Raises:
             RuntimeError: If initialization fails due to missing config, setup failure, or unreadable config state.
         """
-        def _is_initialized() -> bool:
-            """
-            Check if the MilesLib root directory has been initialized.
-
-            Returns:
-                bool: True if initialized.
-
-            Raises:
-                RuntimeError: If the root has not been set up yet.
-            """
-            if Directory.absolute_path is None:
-                raise RuntimeError(
-                    "MilesLib root not initialized. Run `mileslib setup` to initialize the project root."
-                )
-            print(f"[validate] Already initialized: {Directory.absolute_path}")
-            return True
-
         def _load_from_config() -> Path:
             """
             Restore Directory.absolute_path from the on-disk config file.
@@ -1051,8 +1035,14 @@ class Directory:
                 print("[validate] Config file does not exist.")
                 raise RuntimeError("Could not initialize from config. Run `mileslib setup` first.")
 
-            absolute_path = Path(sm.cfg_get("absolute_root", pdir=root))
-            print(f"[validate] Found absolute_root in config: {absolute_path}")
+            print("[debug] Using pdir for cfg_get:", root)
+            absolute_root_str = sm.cfg_get("absolute_root", pdir=root)
+            print("[debug] absolute_root from config:", absolute_root_str)
+
+            if absolute_root_str is None:
+                raise RuntimeError("Config file is missing 'absolute_root'. Run `mileslib setup` again.")
+
+            absolute_path = Path(absolute_root_str)
 
             if not absolute_path.exists():
                 print("[validate] Config absolute_root path does not exist on filesystem.")
@@ -1061,6 +1051,9 @@ class Directory:
             Directory.absolute_path = absolute_path
             Directory.setup_complete = True
             print(f"[validate] Directory initialized from config: {absolute_path}")
+            print(f"Acknowledged Directory class setup: {Directory.setup_complete}")
+            print(f"Acknowledged Directory class absolute path: {Directory.absolute_path}")
+
             return absolute_path
 
         def _setup():
@@ -1081,19 +1074,20 @@ class Directory:
             else:
                 print("[success] MilesLib root initialized.")
 
-        if Directory.setup_complete is True or _is_initialized():
+        if Directory.setup_complete is True and Directory.absolute_path.exists():
             print(f"[validate] Already marked complete: {Directory.absolute_path}")
             return Directory.absolute_path
 
+        print(f"[validate] Could not initialize. Attempting to find config...")
         try:
             return _load_from_config()
-        except RuntimeError:
-            print("[validate] Config not found. Attempting setup...")
+        except RuntimeError as e:
+            print(f"[validate] Config load failed: {e}")
+            print("[validate] Config not found or invalid. Attempting setup...")
             _setup()
             return _load_from_config()
 
 #IS_INITIALIZED = Directory.is_initialized()
-ABSOLUTE_PATH = Directory.absolute_path
 DIRECTORY_USAGE="""
 MilesLib Directory Constants
 ----------------------------
@@ -1209,13 +1203,28 @@ class CLI:
                 RuntimeError: If root is not initialized.
                 subprocess.CalledProcessError: If Django project creation fails.
             """
-            root = Directory.validate() / project_name
+
+            #Validate Directory
+            click.echo("[debug] Validating Directory ...")
+            try:
+                root = Directory.validate() / project_name
+                click.echo(f"[debug] {root} successfully identified as project root.")
+            except Exception as e:
+                click.echo(f"[validate error]: {e}")
+                raise click.Abort
+
             cfg = root / "_config"
             tests = root / "_tests"
             logs = root / "_logs"
             tmp = root / ".tmp"
 
             try:
+                click.echo("[init] Initializing Django project...")
+                subprocess.run(
+                    ["python", "-m", "django", "startproject", project_name, Directory.absolute_path],
+                    check=True
+                )
+
                 click.echo(f"[init] Creating directories for '{project_name}'...")
                 for d in [root, cfg, tests, logs, tmp]:
                     sm.validate_directory(d)
@@ -1236,12 +1245,6 @@ class CLI:
                     },
                     overwrite=False,
                     replace_existing=False
-                )
-
-                click.echo("[init] Initializing Django project...")
-                subprocess.run(
-                    ["python", "-m", "django", "startproject", project_name, str(root)],
-                    check=True
                 )
 
             except Exception as e:
