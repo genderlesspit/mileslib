@@ -18,6 +18,8 @@ import zipfile
 from datetime import datetime
 from dynaconf import Dynaconf
 import click
+import re
+import textwrap
 
 class StaticMethods:
     class Dependencies:
@@ -1027,22 +1029,33 @@ class Directory:
         Directory.absolute_path = self.root
         self.config_name = "mileslib_config.toml"
         self.config_dir = sm.validate_directory(self.root / "_config")
+        config_path = self.config_dir / self.config_name
+
         try:
-            self.config_path = sm.validate_file(self.config_dir / self.config_name )
+            self.config_path = sm.validate_file(config_path)
         except FileNotFoundError:
-            sm.cfg_write(
-                pdir=self.root,
-                file_name=self.config_name,
-                data={
-                    "valid": True,
-                    "absolute_root": f"{self.root}",
-                },
-                section="mileslib",
-                overwrite=False,
-                replace_existing=False
-            )
+            print("[debug] Config file not found, writing new one...")
+            try:
+                sm.cfg_write(
+                    pdir=self.root,
+                    file_name=self.config_name,
+                    data={
+                        "valid": True,
+                        "absolute_root": str(self.root),
+                    },
+                    section="mileslib",
+                    overwrite=False,
+                    replace_existing=False
+                )
+            except Exception as e:
+                raise RuntimeError(f"[cfg_write error] {e}")
+
+            # Now confirm it's there
+            if not config_path.exists():
+                raise RuntimeError(f"Config still missing after write: {config_path}")
+            self.config_path = sm.validate_file(config_path)
         except IsADirectoryError:
-            raise RuntimeError("Config file is actually a directory...? How did this happen?")
+            raise RuntimeError("Config file is actually a directory...?")
 
         Directory.setup_complete = True
 
@@ -1099,27 +1112,25 @@ class Directory:
 
         def _setup():
             print("[validate] Running setup subprocess...")
+            cmd = ["python", "-m", "mileslib", "setup"]
+            print(f"[subprocess] Calling: {' '.join(cmd)}")
             result = subprocess.run(
-                ["python", "-m", "mileslib", "setup"],
+                cmd,
                 capture_output=True,
                 text=True
             )
-
-            print("[stdout]", result.stdout)
-            print("[stderr]", result.stderr)
-            print("[exit code]", result.returncode)
+            print(f"[subprocess stdout]\n{result.stdout}")
+            print(f"[subprocess stderr]\n{result.stderr}")
+            print(f"[subprocess exit code]: {result.returncode}")
 
             if result.returncode != 0:
-                print("[error] MilesLib setup failed.")
-                raise RuntimeError("Critical error with core MilesLib setup logic. Please report on github.")
-            else:
-                print("[success] MilesLib root initialized.")
+                raise RuntimeError("Critical error with core MilesLib setup logic.")
 
         if Directory.setup_complete is True and Directory.absolute_path.exists():
             print(f"[validate] Already marked complete: {Directory.absolute_path}")
             return Directory.absolute_path
 
-        print(f"[validate] Could not initialize. Attempting to find config...")
+        print(f"[validate] No class level variables present.")
         try:
             return _load_from_config()
         except RuntimeError as e:
@@ -1132,16 +1143,6 @@ class Directory:
 DIRECTORY_USAGE="""
 MilesLib Directory Constants
 ----------------------------
-
-• IS_INITIALIZED
-    → bool: True if MilesLib root has been initialized via Directory().
-    → Raises RuntimeError if accessed before initialization.
-    → Alias: Directory.is_initialized()
-
-• ABSOLUTE_PATH
-    → Path: The absolute root directory of the current MilesLib project.
-    → Set automatically during Directory() instantiation.
-    → Alias: Directory.absolute_path
 """
 
 class CLI:
@@ -1165,7 +1166,8 @@ class CLI:
         """
         Launch the CLI group. Entry point for CLI execution.
         """
-        self.cli()
+        print(f"[debug] CLI args: {sys.argv}")
+        self.Project.dispatch_or_fallback(self.cli)  # <- new dynamic entrypoint
 
     def _register_commands(self):
         """
@@ -1255,6 +1257,9 @@ class CLI:
                 raise click.Abort
 
             proj_root = sm.validate_directory(root)
+            proj_root_str = repr(str(proj_root))
+            absolute_path_str = repr(str(Directory.absolute_path))
+
             cfg = root / "_config"
             tests = root / "_tests"
             logs = root / "_logs"
@@ -1275,22 +1280,107 @@ class CLI:
 
             def init_config():
                 click.echo("[init] Writing default configuration...")
+                db_name = f"{project_name}_db"
                 sm.cfg_write(
                     pdir=root,
                     file_name="settings.toml",
                     data={
                         "valid": True,
                         "project": project_name,
+                        "database_name": db_name,
                         "env": {"active": "default"},
                         "paths": {
+                            "absolute_root": str(Directory.absolute_path),
+                            "project_root": str(proj_root),
                             "config": str(cfg),
                             "logs": str(logs),
                             "tmp": str(tmp)
+                        },
+                        "database": {
+                            "engine": "postgresql",
+                            "host": "${DB_HOST}",
+                            "port": "${DB_PORT}",
+                            "name": "${DB_NAME}",
+                            "user": "${DB_USER}",
+                            "password": "${DB_PASS}"
                         }
                     },
                     overwrite=False,
                     replace_existing=False
                 )
+
+            def init_env():
+                db_name = f"{project_name}_db"
+                env_data = {
+                    "DB_HOST": "localhost",
+                    "DB_PORT": "5432",
+                    "DB_NAME": db_name,
+                    "DB_USER": "miles",
+                    "DB_PASS": "changeme"
+                }
+                sm.FileIO.write(
+                    path=root / ".env",
+                    ext="env",
+                    data=env_data,
+                    overwrite=True,
+                    replace_existing=True
+                )
+                env_file = sm.validate_file(path=Path(root / ".env"))
+                if env_file.exists() is False:
+                    raise FileNotFoundError("Could not locate .env file!")
+                env_read = sm.FileIO.read(env_file, ext="env")
+                if env_read is None:
+                    raise AttributeError("Failed to write to .env file!")
+
+            def init_global_variables():
+                """Write a global.py file that exposes project constants."""
+                global_file = proj_root / "global.py"
+
+                content = textwrap.dedent(f"""\
+                    # Auto-generated by MilesLib init_project
+                    from pathlib import Path
+                    from mileslib import StaticMethods as sm
+
+                    ABSOLUTE_ROOT = sm.cfg_get('absolute_root', pdir={absolute_path_str}, section='path')
+                    PROJECT_ROOT = sm.cfg_get('project_root', pdir={proj_root_str}, section='path')
+                """)
+
+                global_file.write_text(content, encoding="utf-8")
+                print(f"[init] Wrote global constants to {global_file}")
+
+            def patch_django_settings():
+                """Inject MilesLib Config loader into Django settings.py."""
+                settings_path = proj_root / f"{project_name}_core" / "settings.py"
+                if not settings_path.exists():
+                    raise FileNotFoundError(f"{settings_path} not found")
+
+                content = settings_path.read_text(encoding="utf-8")
+
+                # Remove existing DATABASES
+                content = re.sub(
+                    r"DATABASES\s*=\s*{(?:[^{}]*|{[^{}]*})*}",
+                    "",
+                    content,
+                    flags=re.DOTALL
+                )
+
+                patch = "\n".join([
+                    "from mileslib import StaticMethods as sm",
+                    "",
+                    "DATABASES = {",
+                    "    'default': {",
+                    "         'ENGINE': 'django.db.backends.postgresql',",
+                    f"        'NAME': sm.cfg_get(pdir={proj_root_str}, 'name', section='database'),",
+                    f"        'USER': sm.cfg_get(pdir={proj_root_str}, 'user', section='database'),",
+                    f"        'PASSWORD': sm.cfg_get(pdir={proj_root_str}, 'password', section='database'),",
+                    f"        'HOST': sm.cfg_get(pdir={proj_root_str}, 'host', section='database'),",
+                    f"        'PORT': sm.cfg_get(pdir={proj_root_str}, 'port', section='database'),",
+                    "    }",
+                    "}"
+                ])
+
+                settings_path.write_text(content + "\n\n" + patch, encoding="utf-8")
+                print(f"[patch] Rewrote Django settings.py to use StaticMethods.Config")
 
             def acknowledge_project():
                 click.echo("[init] Acknowledging project globally...")
@@ -1298,7 +1388,7 @@ class CLI:
                     pdir=Directory.absolute_path,
                     file_name="mileslib_config.toml",
                     data={
-                        f"{project_name}": proj_root
+                        f"{project_name}": str(proj_root)
                     },
                     section="active_projects"
                 )
@@ -1307,6 +1397,9 @@ class CLI:
                 init_django()
                 init_directories()
                 init_config()
+                init_env()
+                init_global_variables()
+                patch_django_settings()
                 acknowledge_project()
 
             except Exception as e:
@@ -1315,6 +1408,79 @@ class CLI:
                     shutil.rmtree(root)
                 click.echo("[abort] Setup aborted.")
                 exit(1)
+
+    class Project:
+        @staticmethod
+        def dispatch_or_fallback(main_cli):
+            args = sys.argv[1:]
+            if not args or args[0].startswith("-"):
+                return main_cli()  # no project name provided, run top-level CLI
+
+            project_name = args[0]
+            try:
+                root = Directory.validate()
+                config = sm.cfg_get("active_projects", pdir=root)
+                if project_name not in config:
+                    click.echo(f"[error] Unknown project: '{project_name}'")
+                    return main_cli()
+
+                project_path = Path(config[project_name])
+                ctx = {"project": project_name, "project_path": project_path}
+
+                # Dispatch to the project CLI with remaining args
+                CLI.Project.project_cli().main(args=args[1:], obj=ctx, standalone_mode=False)
+
+            except Exception as e:
+                click.echo(f"[critical] Could not dispatch project command: {e}")
+                return main_cli()
+
+        @staticmethod
+        def project_cli():
+            @click.group()
+            @click.pass_context
+            def cli(ctx):
+                """Project-scoped commands"""
+                pass
+
+            # Register all subcommands
+            cli.add_command(CLI.Project.CMDs.run_diagnostic)
+            # Future commands here...
+            return cli
+
+        class CMDs:
+            @staticmethod
+            @click.command(name="diagnostic")
+            @click.pass_context
+            def run_diagnostic(ctx):
+                """
+                Run diagnostic checks on this project.
+
+                Args:
+                    ctx (click.Context): CLI context with project metadata.
+                """
+                try:
+                    project = ctx.obj["project"]
+                    path = ctx.obj["project_path"]
+                    CLI.Project.Methods.run_diagnostic_logic(project, path)
+                except Exception as e:
+                    click.echo(f"[error] Diagnostic failed: {e}")
+                    raise click.Abort()
+
+        class Methods:
+            @staticmethod
+            def run_diagnostic_logic(project: str, path: Path):
+                """
+                Core diagnostic logic.
+
+                Args:
+                    project (str): Name of the project.
+                    path (Path): Path to the project directory.
+                """
+                click.echo(f"[diagnostic] Running checks for: {project} at {path}")
+                if not (path / "_config").exists():
+                    raise RuntimeError("Missing _config directory.")
+                click.echo("[diagnostic] Configuration looks valid.")
+
 
 # Entry point
 if __name__ == "__main__":
