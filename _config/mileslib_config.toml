@@ -1,0 +1,7 @@
+[mileslib]
+valid = true
+absolute_root = "C:\\Users\\miles\\PycharmProjects\\mileslib"
+
+[active_projects]
+proj = "C:\\Users\\miles\\PycharmProjects\\mileslib\\proj"
+max = "C:\\Users\\miles\\PycharmProjects\\mileslib\\max"

@@ -517,3 +517,73 @@ project-name/
 * Document full stack in README + usage examples
 
 **Checkpoint:** `mileslib init <name> --stack azure-hybrid --extras redis,celery` generates fully bootable backend
+
+✅ Already Done (Sprint 2, Days 1–3)
+mileslib init CLI: generates Django scaffold with .env, settings.toml, diagnostics, and global.py.
+
+Azure AD stubbed via diagnostics scaffold.
+
+.env supports PostgreSQL, AAD.
+
+Centralized logger.
+
+🔧 Remaining Sprint 2 Tasks
+Day 4 – Shared Env + PostgreSQL Integration
+
+ Inject DATABASE_URL into .env
+
+ Add Docker support for PostgreSQL (already partially scaffolded)
+
+ Write env_util.py to load/validate .env
+
+ Confirm Django can connect to the PostgreSQL container
+
+Day 5 – Extras + Tests
+
+ Add optional --extras redis,celery support
+
+ Scaffold celery.py, redis.py, and background_tasks.py
+
+ Add pytest coverage for CLI + diagnostics
+
+ Validate idempotent behavior if mileslib init is rerun
+
+ Extend README.md with stack usage
+
+🚀 Sprint 3: Azure Deployment Pipeline
+ Azure App Services deployment configs for Django
+
+ PostgreSQL .env integration confirmed in cloud env
+
+ Set up HTTPS via Azure Front Door (just infra config)
+
+ Add Front Door routing config: /admin → Django
+
+ Create /healthz/ endpoint in Django
+
+ Draft CI/CD script (GitHub Actions or manual deployment)
+
+ Create internal deployment doc
+
+🛠️ Integrate Remaining Infrastructure Feasibility Breakdown
+These can be rolled in during Sprint 3 or at the tail end of Sprint 2 Day 5:
+
+ Static storage: Use django-storages + Azure Blob + config in .env
+
+ Secrets mgmt: Add optional Azure Key Vault integration
+
+ Email: Scaffold EMAIL_BACKEND, document .env vars
+
+ Monitoring: Add support for Sentry or Azure App Insights
+
+ Admin lockdown: Restrict admin view by IP or group
+
+ CORS/CSRF: Scaffold and configure django-cors-headers
+
+ Rate limiting: Optional middleware integration (e.g. django-ratelimit)
+
+ Backup strategy: Add pg_dump cron or Azure DB backup hook
+
+ Session storage: Optional Redis backend support via django-redis
+
+

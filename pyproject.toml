@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.scripts]
-mileslib = "mileslib.cli.main:cli"
+mileslib = "mileslib:CLI().launch"
 
 [tool.setuptools.packages.find]
 where = ["mileslib"]
