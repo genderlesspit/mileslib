@@ -468,28 +468,40 @@ class StaticMethods:
             return content
 
         @staticmethod
-        def write(path: Path, ext: str, data: dict, overwrite: bool = False, replace_existing: bool = False,
-                  section: str = "default"):
+        def write(
+                path: Path,
+                ext: str,
+                data: dict,
+                overwrite: bool = False,
+                replace_existing: bool = False,
+                section: str = None
+        ):
             ext = ext.lower()
             print(f"[FileIO] Writing {ext} config to {path}")
-            merged_data = data
+            merged_data = {}
 
             if not overwrite and path.exists():
                 print("[FileIO] File exists — merging data")
                 existing = StaticMethods.FileIO.read(path, ext)
 
                 if ext in ("toml", "json", "yaml", "yml"):
-                    base = existing.get(section, {}) if section else existing
-                    merged = StaticMethods.FileIO._merge(base, data, replace_existing)
-                    merged_data = {section: merged} if section else merged
+                    if section:
+                        base = existing.get(section, {})
+                        merged = StaticMethods.FileIO._merge(base, data, replace_existing)
+                        existing[section] = merged
+                        merged_data = existing
+                    else:
+                        merged_data = StaticMethods.FileIO._merge(existing, data, replace_existing)
                 else:
-                    merged = StaticMethods.FileIO._merge(existing, data, replace_existing)
-                    merged_data = merged
+                    merged_data = StaticMethods.FileIO._merge(existing, data, replace_existing)
             else:
                 print("[FileIO] Overwriting existing config")
-                if ext in ("toml", "json", "yaml", "yml") and section:
-                    merged_data = {section: data}
+                if ext in ("toml", "json", "yaml", "yml"):
+                    merged_data = {section: data} if section else data
+                else:
+                    merged_data = data
 
+            # Write to disk
             if ext == "toml":
                 import toml
                 path.write_text(toml.dumps(merged_data), encoding="utf-8")
@@ -511,7 +523,7 @@ class StaticMethods:
                     raise ValueError("TXT write requires {'content': str}")
                 path.write_text(data["content"], encoding="utf-8")
             else:
-                raise ValueError(f"[StaticMethods.FileIO] Unsupported config format: {ext}")
+                raise ValueError(f"[FileIO] Unsupported config format: {ext}")
 
         @staticmethod
         def _merge(base: dict, new: dict, replace: bool = False) -> dict:
@@ -627,18 +639,20 @@ class StaticMethods:
             return StaticMethods.FileIO.read(file_path, ext)
 
         @staticmethod
-        def write(pdir=None, file_name="settings.toml", data=None, overwrite=False, replace_existing=False):
+        def write(pdir=None, file_name="settings.toml", data=None, section=None, overwrite=False,
+                  replace_existing=False):
             """
             Write configuration data to the specified config file using FileIO.
 
-            Supports overwrite or merge mode, depending on flags provided.
+            Supports full overwrite, partial merging, and nested section targeting via dot notation.
 
             Args:
                 pdir (str | Path, optional): Project root directory.
                 file_name (str): Name of the file to write (e.g., 'settings.toml').
                 data (dict): Data to write.
-                overwrite (bool): If True, replace the file entirely.
-                replace_existing (bool): If False, keep existing values unless missing.
+                section (str, optional): Dot-path to section (e.g., 'default.active_projects').
+                overwrite (bool): If True, replaces the file completely.
+                replace_existing (bool): If False, preserves existing keys unless missing.
             """
             pdir = StaticMethods.Config._resolve_pdir(pdir)
             cfg_dir = StaticMethods.Config._get_config_dir(pdir)
@@ -647,13 +661,41 @@ class StaticMethods:
             file_path = cfg_dir / file_name
             ext = file_path.suffix.lstrip(".")
 
-            StaticMethods.FileIO.write(file_path, ext, data or {}, overwrite, replace_existing)
+            # Read existing data unless full overwrite
+            existing_data = {}
+            if not overwrite and file_path.exists():
+                existing_data = StaticMethods.FileIO.read(file_path, ext) or {}
+
+            # Normalize all values (convert Path → str)
+            flattened_data = {
+                str(k): str(v) if isinstance(v, Path) else v
+                for k, v in (data or {}).items()
+            }
+
+            if section:
+                # Traverse or create nested section structure
+                section_keys = section.split(".")
+                ref = existing_data
+                for key in section_keys:
+                    ref = ref.setdefault(key, {})
+
+                for k, v in flattened_data.items():
+                    if replace_existing or k not in ref:
+                        ref[k] = v
+            else:
+                for k, v in flattened_data.items():
+                    if replace_existing or k not in existing_data:
+                        existing_data[k] = v
+
+            print("[cfg_write] FINAL write object:")
+            print(json.dumps(existing_data, indent=2))
+            # Always overwrite the file with updated merged structure
+            StaticMethods.FileIO.write(file_path, ext, existing_data, overwrite=True)
 
         @staticmethod
-        def get(*keys, pdir=None, default=None, expected=None, is_global=False, section="default"):
+        def get(*keys, pdir=None, default=None, expected=None, is_global=False, section=None):
             data = StaticMethods.Config.build(pdir=pdir, is_global=is_global)
-
-            if section and isinstance(data, dict):
+            if section:
                 data = data.get(section, {})
 
             try:
@@ -994,9 +1036,8 @@ class Directory:
                 data={
                     "valid": True,
                     "absolute_root": f"{self.root}",
-                    "active_projects": {
-                    }
                 },
+                section="mileslib",
                 overwrite=False,
                 replace_existing=False
             )
@@ -1036,7 +1077,7 @@ class Directory:
                 raise RuntimeError("Could not initialize from config. Run `mileslib setup` first.")
 
             print("[debug] Using pdir for cfg_get:", root)
-            absolute_root_str = sm.cfg_get("absolute_root", pdir=root)
+            absolute_root_str = sm.cfg_get("absolute_root", pdir=root, section="mileslib")
             print("[debug] absolute_root from config:", absolute_root_str)
 
             if absolute_root_str is None:
@@ -1213,22 +1254,26 @@ class CLI:
                 click.echo(f"[validate error]: {e}")
                 raise click.Abort
 
+            proj_root = sm.validate_directory(root)
             cfg = root / "_config"
             tests = root / "_tests"
             logs = root / "_logs"
             tmp = root / ".tmp"
+            django_name = f"{project_name}_core"
 
-            try:
+            def init_django():
                 click.echo("[init] Initializing Django project...")
                 subprocess.run(
-                    ["python", "-m", "django", "startproject", project_name, Directory.absolute_path],
+                    ["python", "-m", "django", "startproject", django_name, proj_root],
                     check=True
                 )
 
+            def init_directories():
                 click.echo(f"[init] Creating directories for '{project_name}'...")
                 for d in [root, cfg, tests, logs, tmp]:
                     sm.validate_directory(d)
 
+            def init_config():
                 click.echo("[init] Writing default configuration...")
                 sm.cfg_write(
                     pdir=root,
@@ -1246,6 +1291,23 @@ class CLI:
                     overwrite=False,
                     replace_existing=False
                 )
+
+            def acknowledge_project():
+                click.echo("[init] Acknowledging project globally...")
+                sm.cfg_write(
+                    pdir=Directory.absolute_path,
+                    file_name="mileslib_config.toml",
+                    data={
+                        f"{project_name}": proj_root
+                    },
+                    section="active_projects"
+                )
+
+            try:
+                init_django()
+                init_directories()
+                init_config()
+                acknowledge_project()
 
             except Exception as e:
                 click.echo(f"[error] {project_name} initialization failed!: {e}")
