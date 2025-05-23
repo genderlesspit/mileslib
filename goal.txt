@@ -1,54 +1,90 @@
-Key Goal:
-MilesLib init should generate a deploy-ready project skeleton with:
+⚙️ Level 1 — Fully Independent Foundations
+These have no internal dependencies. Everything else can use them.
 
-Django (admin/auth)
+🔹 EnvLoader
+Manages .env parsing and global environment variable caching.
+Depends on: os, PathUtil
 
-FastAPI (REST/async)
+🔹 PathUtil
+Normalizes paths, ensures directories and files exist.
+Depends on: pathlib, os
 
-PostgreSQL config
+🔧 Level 2 — Light Utility Wrappers
+Utilities that extend core Python features using Level 1 tools.
 
-Shared config/logging
+🔹 ErrorHandling
+Provides attempt(), recall(), timer(), and check_input().
+Depends on: print, time, optionally Logger
 
-Azure deploy files (Docker, az webapp, secrets)
+🔹 FileIO
+Reads/writes TOML, JSON, ENV, YAML, TXT.
+Depends on: PathUtil, optionally EnvLoader
 
-Optional Redis + Celery setup
+🔹 InputValidator (new)
+Centralized input and argument type checking.
+Depends on: ErrorHandling
 
-Updated MilesLib Vision: Project Bootstrap CLI
-Command
-bash
-Copy
-Edit
-mileslib init project-name --stack azure-hybrid
-It Auto-Generates:
-1. Folder Structure
-pgsql
-Copy
-Edit
-project-name/
-├── django_app/
-│   ├── manage.py
-│   ├── settings.py
-│   └── urls.py
-├── fastapi_app/
-│   ├── main.py
-│   └── routes/
-│       └── test.py
-├── shared/
-│   ├── mileslib/  (symlink or package import)
-│   └── config.json
-├── docker/
-│   ├── django.Dockerfile
-│   ├── fastapi.Dockerfile
-│   └── compose.yml
-├── deploy/
-│   ├── azure_frontdoor.tf
-│   └── appservice_config.json
-└── README.md
-2. Included Modules
-Module	Tool	Notes
-Django	Admin panel + Azure AD login scaffold	Uses django-auth-adfs
-FastAPI	Async job API + WebSocket	Uses fastapi, uvicorn, python-jose
-PostgreSQL	Common DB schema + env config	Optional: init migration
-Auth	Shared Azure AD tokens across both apps	Uses msal, authlib
-MilesLib	Imported in both Django + FastAPI	Logging, config, utilities
-Deploy	Docker + Terraform + Azure CLI templates	App Service + PostgreSQL + Front Door
+🧩 Level 3 — Mid-Level Coordinators
+These coordinate multiple utilities and abstract them into workflows.
+
+🔹 Config
+Loads and writes structured config from disk.
+Depends on: FileIO, PathUtil, EnvLoader, ErrorHandling
+
+🔹 Decorators (e.g. @mileslib)
+Wraps functions with logging, retry, env, timing, and safe fail.
+Depends on: ErrorHandling, EnvLoader, optionally Logger
+
+🔐 Level 4 — Secrets, Caching, and Metadata
+These modules build on configs, environments, and logging.
+
+🔹 Secrets
+Retrieves secrets from Azure Key Vault or env.
+Depends on: EnvLoader, Config, ErrorHandling
+
+🔧 Level 5 — Operational Backends
+Interacts with live systems, services, or APIs.
+
+🔹 Dependencies
+Handles on-demand pip installs and module loading.
+Depends on: ErrorHandling, subprocess, try_import
+
+🔹 Logger
+Loguru-based file logger with setup and reset hooks.
+Depends on: PathUtil, optionally EnvLoader, Config
+
+🔹 Requests
+HTTP GET/POST with retries and logging.
+Depends on: Dependencies, ErrorHandling
+
+🏗️ Level 6 — External System Integrators
+Modules that connect MilesLib to 3rd-party services and platforms.
+
+🔹 AzureAD
+Azure App Registration, MSAL tokens, tenant login URLs.
+Depends on: Secrets, Requests, EnvLoader, Config
+
+🔹 PostgresManager
+Creates PostgreSQL DBs, users, grants roles.
+Depends on: EnvLoader, Config, psycopg2 or asyncpg
+
+🔹 KeyVaultManager
+Manages Azure Key Vault secrets.
+Depends on: Secrets, EnvLoader, Config
+
+🔹 TemplateRenderer
+Jinja2-based scaffolding and file patching.
+Depends on: PathUtil, FileIO, jinja2
+
+🔹 GitManager
+Git init, commit, remote add for project scaffolds.
+Depends on: subprocess, PathUtil, EnvLoader
+
+🚀 Level 7 — Top-Level Orchestrators
+🔹 Directory
+Initializes project root, bootstraps config files, manages global state.
+Depends on: Config, EnvLoader, FileIO, PathUtil, Logger
+
+🔹 CLIRegistry
+Command group for Click-based CLI interface.
+Depends on: click, PathUtil, Logger

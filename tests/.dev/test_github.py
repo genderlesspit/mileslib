@@ -12,12 +12,12 @@ class Github:
         self.dir = dir
         self.quiet = quiet or False
         if self.m.exists("config", "config.json") is True:
-            self.repo_url = self.m.config.get("repo_url")
+            self.repo_url = self.m.config.get("repo_url", )
         else:
             self.repo_url = "https://raw.githubusercontent.com/genderlesspit/phazedeck/master"
             self.get("config", "config.json")
-        self.token = self.m.config.get("token") if token else None
-        self.local_version = self.m.config.get("local_version") or "0.0.0"
+        self.token = self.m.config.get("token", ) if token else None
+        self.local_version = self.m.config.get("local_version", ) or "0.0.0"
         self.remote_config = self.get("config", "config.json", no_save=True)
         self.update = self.Update(self)
 
@@ -38,7 +38,7 @@ class Github:
             self.github.m.log.info("Current Github version requested...")
             try:
                 configdict = json.loads(self.github.remote_config)
-                ver = configdict.get("local_version")
+                ver = configdict.get("local_version", )
                 self.m.log.info(f"Current Github version is {ver}")
                 return ver
             except Exception as e:

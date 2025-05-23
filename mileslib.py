@@ -128,64 +128,95 @@ class StaticMethods:
 
             return decorator
 
-        # Deprecated
         @staticmethod
-        def recall(fn: Callable, *args, **kwargs):
+        def recall(fn: Callable, fix: Union[Callable|List]):
+            """
+            Calls a zero-argument function with retry logic and one or more fix strategies.
+
+            This is a wrapper around `attempt()` that enforces callable-based retry behavior.
+            If `fix` is a list, each callable will be tried in order as a fallback.
+
+            Args:
+                fn (Callable[[], Any]): Zero-arg callable to execute (use lambda for args).
+                fix (Callable or list of Callable): One or more fix strategies, all zero-arg callables.
+
+            Returns:
+                Any: The result of the successful callable.
+
+            Raises:
+                RuntimeError: If all fallback functions fail or a fix callback errors.
+                TypeError: If a non-callable is passed to `fix`.
+            """
             # simply forward to attempt
-            return StaticMethods.ErrorHandling.attempt(fn, *args, **kwargs)
+            try:
+                if isinstance(fix, list):
+                    for fn in fix: StaticMethods.ErrorHandling.attempt(fn, fix=fn)
+                elif callable(fix):
+                    return StaticMethods.ErrorHandling.attempt(fn, fix=fix)
+            except TypeError: raise TypeError
 
         @staticmethod
         def attempt(
                 fn: Callable,
-                *args,
                 retries: int = 3,
+                fix: Optional[Callable[[], None]] = None,
                 backoff_base: Optional[int] = None,
-                handled_exceptions: Tuple[Type[BaseException], ...] = (Exception,),
                 label: str = "operation",
-                **kwargs
         ) -> Any:
             """
-            Executes a function with retry logic, timing, and structured logging.
+            Executes a no-argument callable with retry logic, optional fix handler, and timing.
 
-            Wraps the function with the `timer` decorator and retries on specified exceptions.
-            Supports optional exponential backoff between attempts.
+            This function expects that `fn` and `fix` are zero-argument callables.
+            If your function requires parameters, wrap it in a `lambda` or use `functools.partial`.
 
             Args:
-                fn (Callable): The function to execute.
-                *args: Positional arguments to pass to the function.
-                retries (int): Maximum number of attempts before failing.
-                backoff_base (int, optional): Base for exponential backoff. If None, no delay is applied.
-                handled_exceptions (Tuple[Type[BaseException], ...]): Exceptions to catch and retry.
-                label (str): Descriptive label for logging purposes.
-                **kwargs: Keyword arguments to pass to the function.
+                fn (Callable[[], Any]): A zero-argument callable to execute (e.g., lambda: my_func(x)).
+                retries (int): Number of retry attempts (default: 3).
+                fix (Callable[[], None], optional): One-time recovery callable to run after the first failure.
+                backoff_base (int, optional): If set, applies exponential backoff (e.g., 2 = 1s, 2s, 4s).
+                label (str): Label for logging and timing context.
 
             Returns:
-                Any: The result of the function call if successful.
+                Any: The result of `fn()` if successful.
 
             Raises:
-                BaseException: The last caught exception if all attempts fail.
+                RuntimeError: If `fix()` fails or is reused.
+                Exception: The last raised exception if all retries fail.
             """
-            log = StaticMethods.log
+            label = label or getattr(fn, "__name__", "operation")
             timed_fn = StaticMethods.ErrorHandling.timer(label)(fn)
+            last_exception = None
+            attempted_fix = False
 
             for attempt in range(1, retries + 1):
                 try:
-                    result = timed_fn(*args, **kwargs)
-                    log.info(f"[{label}] Success on attempt {attempt}")
+                    result = timed_fn()
+                    print(f"[{label}] Success on attempt {attempt}")
                     return result
-                except handled_exceptions as e:
+                except Exception as e:
+                    if attempted_fix is True: raise RuntimeError
                     last_exception = e
-                    log.warning(f"[{label}] Attempt {attempt}/{retries} failed: {e}")
+                    print(f"[{label}] Attempt {attempt}/{retries} failed: {e}")
+                    if fix:
+                        try:
+                            print(f"[{label}] Attempting to fix using {fix}...")
+                            fix()
+                            attempted_fix = True
+                            continue
+                        except:
+                            print(f"[{label}] Fix failed!")
+                            raise RuntimeError
                     if attempt < retries and backoff_base:
                         delay = backoff_base ** (attempt - 1)
-                        log.info(f"[{label}] Retrying in {delay}s...")
+                        print(f"[{label}] Retrying in {delay}s...")
                         time.sleep(delay)
+                        continue
+                    print(f"[{label}] All {retries} attempts failed.")
 
-            log.error(f"[{label}] All {retries} attempts failed.")
             raise last_exception
 
         @staticmethod
-        def check_input(arg: Any, expected: Union[Type, Tuple[Type, ...]], label: str = "Input") -> None:
+        def check_input(arg: Any, expected: Union[Type, Tuple[Type, ...]], label: str = "Input") -> Any:
             """
             Verifies that the input matches the expected type(s). Raises TypeError if not.
 
@@ -204,10 +235,11 @@ class StaticMethods:
                     else ", ".join(t.__name__ for t in expected)
                 )
                 raise TypeError(f"{label} must be of type {exp_types}, but got {type(arg).__name__}.")
+            return arg
 
     timer = ErrorHandling.timer
     attempt = ErrorHandling.attempt
-    recall = ErrorHandling.attempt
+    recall = ErrorHandling.recall
     check_input = ErrorHandling.check_input
     ERROR_USAGE = """
         StaticMethods ErrorHandling Aliases
@@ -435,10 +467,31 @@ class StaticMethods:
     """
 
     class FileIO:
+        """
+        Static methods for reading and writing configuration files in multiple formats.
+        Supports: TOML, JSON, ENV, YAML, YML, TXT.
+
+        Files are merged if they exist and overwrite is False.
+        """
         SUPPORTED_FORMATS = ["txt", "toml", "json", "env", "yml", "yaml"]
 
         @staticmethod
         def read(path: Path, ext: str, section: str = None) -> dict:
+            """
+            Reads a configuration file based on its extension and returns a dict.
+
+            Args:
+                path (Path): Path to the file.
+                ext (str): File extension (e.g., 'json', 'toml', 'env', 'yml', 'txt').
+                section (str, optional): If provided and the config is a dict, returns that section.
+
+            Returns:
+                dict: Parsed configuration content. TXT returns {'content': str}.
+
+            Raises:
+                ValueError: If file extension is unsupported.
+                ImportError: If PyYAML is needed but not installed.
+            """
             if not path.exists():
                 print(f"[FileIO] File not found: {path}")
                 return {}
@@ -481,6 +534,21 @@ class StaticMethods:
                 replace_existing: bool = False,
                 section: str = None
         ):
+            """
+            Writes configuration data to a file, optionally merging with existing contents.
+
+            Args:
+                path (Path): Target file path.
+                ext (str): File extension (e.g., 'json', 'toml', 'env', 'yml', 'txt').
+                data (dict): Configuration data to write.
+                overwrite (bool): If True, ignore existing file contents.
+                replace_existing (bool): If True, replace existing keys when merging.
+                section (str): If provided, writes data under a specific key in structured formats.
+
+            Raises:
+                ValueError: If the format is unsupported or TXT format is malformed.
+                ImportError: If writing YAML/YML without PyYAML installed.
+            """
             ext = ext.lower()
             print(f"[FileIO] Writing {ext} config to {path}")
             merged_data = {}
@@ -532,12 +600,26 @@ class StaticMethods:
 
         @staticmethod
         def _merge(base: dict, new: dict, replace: bool = False) -> dict:
+            """
+            Merges two dictionaries with optional key replacement.
+
+            Args:
+                base (dict): Original dictionary to merge into.
+                new (dict): New dictionary to merge.
+                replace (bool): Whether to replace existing keys.
+
+            Returns:
+                dict: Merged result.
+            """
             print(f"[FileIO] Merging config: replace_existing={replace}")
             merged = base.copy()
             for k, v in new.items():
                 if k not in merged or replace:
                     merged[k] = v
             return merged
+
+    read = FileIO.read
+    write = FileIO.write
 
     class Config:
         REQUIRED_KEYS = [

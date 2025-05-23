@@ -110,69 +110,105 @@ class StaticMethods:
             """
             def decorator(fn):
                 def wrapper(*args, **kwargs):
-                    log = StaticMethods.log
                     start = time.perf_counter()
                     result = fn(*args, **kwargs)
                     duration = time.perf_counter() - start
-                    log.info(f"[{label}] Completed in {duration:.3f}s")
+                    print(f"[{label}] Completed in {duration:.3f}s")
                     return result
                 return wrapper
             return decorator
 
-        #Deprecated
         @staticmethod
-        def recall(fn: Callable, *args, **kwargs):
+        def recall(fn: Callable, fix: Callable, *args, **kwargs):
+            """
+            Calls a function with retry logic and a required fix callback.
+
+            This is a convenience wrapper around `attempt()` that enforces a `fix` function.
+            Useful when you want to always attempt recovery before retrying.
+
+            Args:
+                fn (Callable): The function to execute.
+                fix (Callable): A callback function to run once upon the first failure.
+                *args: Positional arguments for `fn`.
+                **kwargs: Keyword arguments passed to `attempt`.
+
+            Returns:
+                Any: The result of `fn(*args, **kwargs)` if successful.
+
+            Raises:
+                RuntimeError: If the fix fails or if the function continues to fail after fix.
+                BaseException: The last caught exception if all attempts fail.
+            """
             # simply forward to attempt
-            return StaticMethods.ErrorHandling.attempt(fn, *args, **kwargs)
+            return StaticMethods.ErrorHandling.attempt(fn, fix=fix, *args, **kwargs)
 
         @staticmethod
         def attempt(
             fn: Callable,
             *args,
             retries: int = 3,
+            fix: Optional[Callable[[], None]] = None,
             backoff_base: Optional[int] = None,
             handled_exceptions: Tuple[Type[BaseException], ...] = (Exception,),
             label: str = "operation",
             **kwargs
         ) -> Any:
             """
-            Executes a function with retry logic, timing, and structured logging.
+            Executes a function with retry logic, optional recovery callback, and timing.
 
-            Wraps the function with the `timer` decorator and retries on specified exceptions.
-            Supports optional exponential backoff between attempts.
+            The function is decorated with a timing wrapper. If it raises any of the
+            specified `handled_exceptions`, it will retry up to `retries` times.
+            If a `fix` callback is provided, it will be executed once after the first failure.
+
+            Exponential backoff is supported if `backoff_base` is set.
 
             Args:
                 fn (Callable): The function to execute.
                 *args: Positional arguments to pass to the function.
-                retries (int): Maximum number of attempts before failing.
-                backoff_base (int, optional): Base for exponential backoff. If None, no delay is applied.
-                handled_exceptions (Tuple[Type[BaseException], ...]): Exceptions to catch and retry.
-                label (str): Descriptive label for logging purposes.
-                **kwargs: Keyword arguments to pass to the function.
+                retries (int): Maximum number of attempts (default: 3).
+                fix (Callable, optional): One-time recovery callback to run after first failure.
+                backoff_base (int, optional): Base for exponential backoff (e.g., 2 = 1s, 2s, 4s).
+                handled_exceptions (tuple): Exceptions to catch and retry (default: Exception).
+                label (str): Label for logging and timing context.
+                **kwargs: Additional keyword arguments for the function.
 
             Returns:
-                Any: The result of the function call if successful.
+                Any: The result of the function if any attempt succeeds.
 
             Raises:
-                BaseException: The last caught exception if all attempts fail.
+                RuntimeError: If the `fix` function fails or is reused after one attempt.
+                BaseException: The last encountered exception if all attempts fail.
             """
-            log = StaticMethods.log
             timed_fn = StaticMethods.ErrorHandling.timer(label)(fn)
+            last_exception = None
+            attempted_fix = False
+            label = label or getattr(fn, "__name__", "operation")
 
             for attempt in range(1, retries + 1):
                 try:
                     result = timed_fn(*args, **kwargs)
-                    log.info(f"[{label}] Success on attempt {attempt}")
+                    print(f"[{label}] Success on attempt {attempt}")
                     return result
                 except handled_exceptions as e:
+                    if attempted_fix is True: raise RuntimeError
                     last_exception = e
-                    log.warning(f"[{label}] Attempt {attempt}/{retries} failed: {e}")
+                    print(f"[{label}] Attempt {attempt}/{retries} failed: {e}")
+                    if fix:
+                        try:
+                            print(f"[{label}] Attempting to fix using {fix}...")
+                            fix()
+                            attempted_fix = True
+                            continue
+                        except:
+                            print(f"[{label}] Fix failed!")
+                            raise RuntimeError
                     if attempt < retries and backoff_base:
                         delay = backoff_base ** (attempt - 1)
-                        log.info(f"[{label}] Retrying in {delay}s...")
+                        print(f"[{label}] Retrying in {delay}s...")
                         time.sleep(delay)
+                        continue
+                    print(f"[{label}] All {retries} attempts failed.")
 
-            log.error(f"[{label}] All {retries} attempts failed.")
             raise last_exception
 
         @staticmethod
@@ -1373,7 +1409,7 @@ def test_write_merges_preserves_existing(cfg_dir):
     f.write_text("[default]\nKEEP='yes'\n", encoding="utf-8")
     StaticMethods.Config.write(pdir=path, data={"valid": True}, overwrite=False, replace_existing=False)
     parsed = toml.load(f)
-    assert parsed["default"].get("KEEP") == "yes"
+    assert parsed["default"].get("KEEP", ) == "yes"
 
 
 def test_write_merges_replaces_existing(cfg_dir):
@@ -1382,7 +1418,7 @@ def test_write_merges_replaces_existing(cfg_dir):
     f.write_text("[default]\nfoo='bar'\n")
     StaticMethods.Config.write(pdir=path, data={"foo": "baz"}, overwrite=False, replace_existing=True)
     parsed = toml.load(f)
-    assert parsed["default"].get("foo") == "baz"
+    assert parsed["default"].get("foo", ) == "baz"
 
 
 def test_write_replaces_file_completely(cfg_dir):
@@ -1392,7 +1428,7 @@ def test_write_replaces_file_completely(cfg_dir):
     StaticMethods.Config.write(pdir=path, data={"clean": True}, overwrite=True)
     parsed = toml.load(f)
     assert "remove" not in parsed["default"]
-    assert parsed["default"].get("clean") is True
+    assert parsed["default"].get("clean", ) is True
 
 Logger = StaticMethods.Logger
 
@@ -1461,7 +1497,7 @@ def test_try_import_loguru_returns_logger():
 
 def test_http_get_success(requests_mock):
     url = "https://example.com/data"
-    requests_mock.get(url, text="OK", status_code=200)
+    requests_mock.get(url, )
 
     resp = StaticMethods.Requests.http_get(url)
     assert resp.status_code == 200
@@ -1486,7 +1522,7 @@ def test_http_post_invalid_data_type():
 
 def test_http_get_retries_on_failure(requests_mock):
     url = "https://example.com/retry"
-    requests_mock.get(url, status_code=500)
+    requests_mock.get(url, )
 
     with pytest.raises(Exception):  # requests.HTTPError or general depending on StaticMethods.attempt
         StaticMethods.Requests.http_get(url, retries=2)
