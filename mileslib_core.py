@@ -770,16 +770,33 @@ GLOBAL_CFG_DEFAULT = {
     "template_directory": str(GLOBAL_TEMPLATES_DIR)
 }
 
+project_name = None
+project_root = None
+
 PROJECT_CFG_DEFAULT = {
-    "project_name": "",
-    "project_root": "",
+    "project_name": project_name,
+    "project_root": project_root,
+    "database": {
+        "host": "localhost",
+        "port": "5432",
+        "name": "",
+        "user": "",
+        "password": "",
+    },
+    "aad": {
+        "server": "",
+        "client_id": "",
+        "client_secret": "",
+        "tenant_id": "",
+        "scopes": "User.Read openid profile offline_access",
+        "authority": "https://login.microsoftonline.com/${AAD_TENANT_ID}",
+    },
 }
 
 # ─── Required Keys for Validation ──────────────────────────────
 GLOBAL_CFG_ENSURE_LIST = list(GLOBAL_CFG_DEFAULT.keys())
 PROJECT_CFG_ENSURE_LIST = list(PROJECT_CFG_DEFAULT.keys())
 DENY_LIST: list = ["", None, "null", "NULL", "None", "missing", "undefined", "todo"]
-
 
 thread_local = threading.local()
 thread_local.hijack_depth = 0
@@ -1042,6 +1059,35 @@ class MilesContext:
 
         File format is auto-detected based on file extension.
         """
+        @staticmethod
+        def configify(data: dict) -> dict:
+            """
+            Recursively convert all values in a dictionary to strings.
+            Useful for sanitizing configuration values before serialization.
+
+            Args:
+                data (dict): The input dictionary with arbitrary value types.
+
+            Returns:
+                dict: A new dictionary with the same structure but all values as strings.
+
+            Raises:
+                TypeError: If input is not a dictionary.
+            """
+            if not isinstance(data, dict):
+                raise TypeError("configify expects a dictionary")
+
+            def stringify(val):
+                if isinstance(val, dict):
+                    return {k: stringify(v) for k, v in val.items()}
+                elif isinstance(val, list):
+                    return [stringify(v) for v in val]
+                elif isinstance(val, tuple):
+                    return tuple(stringify(v) for v in val)
+                else:
+                    return str(val)
+
+            return {k: stringify(v) for k, v in data.items()}
 
         @staticmethod
         def build(path):
@@ -1052,6 +1098,7 @@ class MilesContext:
                     default = GLOBAL_CFG_DEFAULT
                     file = sm.ensure_file_with_default(path, default)
                 else:
+                    default = PROJECT_CFG_DEFAULT
                     file = sm.ensure_file_with_default(path, default)
             except Exception as e:
                 raise RuntimeError(f"Could not build config!: {e}")
@@ -1190,7 +1237,7 @@ class MilesContext:
                 for k in remove:
                     data.pop(k, None)
 
-            sm.write(path=path, ext=path.suffix.lstrip("."), data=data, overwrite=True)
+            sm.write(path=path, data=data, overwrite=True)
 
         @staticmethod
         def validate(
@@ -1886,30 +1933,77 @@ class BackendMethods:
             print(f"[template] Wrote: {output_path}")
 
 class CLIDecorator:
-    _top_level = click.Group(invoke_without_command=True)
+    _global = click.Group(invoke_without_command=True)  # formerly _top_level
     _projects = {}
 
     @staticmethod
+    def auto_register_groups():
+        """
+        Automatically register CLI command groups from CMDManager.Core and CMDManager.Project.
+        """
+        groups = {
+            "core": (CLI.CMDManager.Core, False),
+            "project": (CLI.CMDManager.Project, True),
+        }
+
+        for group_name, (cls, project_only) in groups.items():
+            group = click.Group(name=group_name)
+
+            for attr in dir(cls):
+                if attr.startswith("_"):
+                    continue
+                method = getattr(cls, attr)
+                if not isinstance(method, staticmethod):
+                    continue
+
+                fn = method.__func__
+                cmd = CLIDecorator.mileslib_cli(project_only=project_only)(fn)
+                group.add_command(cmd)
+
+            CLIDecorator._global.add_command(group)
+
+    @staticmethod
     def mileslib_cli(*, project_only: bool = False):
+        """
+        Decorator that converts a static method into a Click CLI command.
+        Automatically maps arguments based on the function's signature.
+        """
         def decorator(fn):
             name = fn.__name__.replace("_", "-")
+            sig = inspect.signature(fn)
+            params = list(sig.parameters.values())
 
-            @click.command(name=name)
-            @click.pass_context
-            @wraps(fn)
-            def wrapper(ctx, *args, **kwargs):
-                project = ctx.obj.get("project") if ctx.obj else None
-                print(f"[cli] Running command '{name}' (project={project})")
-                return fn(ctx, *args, **kwargs)
+            def build_click_command():
+                @click.pass_context
+                @wraps(fn)
+                def wrapper(ctx, **kwargs):
+                    project = ctx.obj.get("project") if ctx.obj else None
+                    print(f"[cli] Running command '{name}' (project={project})")
+                    return fn(ctx, **kwargs)
 
-            def register_top_level():
+                for param in reversed(params[1:]):  # Skip 'ctx'
+                    param_type = str if param.annotation is inspect._empty else param.annotation
+                    default = param.default if param.default is not inspect._empty else None
+                    dash_name = param.name.replace("_", "-")
+
+                    if default is None:
+                        wrapper = click.argument(param.name, type=param_type)(wrapper)
+                    else:
+                        wrapper = click.option(f"--{dash_name}", default=default, type=param_type)(wrapper)
+
+                return click.command(name=name, help=fn.__doc__)(wrapper)
+
+            cmd = build_click_command()
+
+            def register_global():
                 if not project_only:
-                    CLIDecorator._top_level.add_command(wrapper)
+                    CLIDecorator._global.add_command(cmd)
 
-            def register_per_project():
-                if not ROOT or not ROOT.exists():
+            def register_project_scoped():
+                root_path = globals().get("ROOT", Path("."))
+                if not root_path.exists():
                     return
-                for subdir in ROOT.iterdir():
+                for subdir in root_path.iterdir():
                     if (subdir / "mileslib_project_settings.toml").exists():
                         pname = subdir.name
                         if pname not in CLIDecorator._projects:
@@ -1920,60 +2014,51 @@ class CLIDecorator:
                                 ctx.obj["project"] = pname
                                 ctx.obj["project_path"] = subdir
                             CLIDecorator._projects[pname] = _group
-                        CLIDecorator._projects[pname].add_command(wrapper)
+                        CLIDecorator._projects[pname].add_command(cmd)
 
-            register_top_level()
-            register_per_project()
-            return wrapper
+            register_global()
+            register_project_scoped()
+            return cmd
 
         return decorator
 
 # Alias for convenience
 mileslib_cli = CLIDecorator.mileslib_cli
 
-# ──────────────────────────────────────────────────────────────
 class CLI:
     """
     MilesLib CLI orchestrator.
     """
 
+    def __init__(self):
+         self.cli = CLIDecorator._global  # renamed from _top_level
+
+    @mileslib
+    def entry(self):
+        """
+        Entry point for MilesLib CLI execution.
+        Decides whether to run global CLI or a project-specific group.
+         """
+        args = sys.argv[1:]
+        print(f"[debug] CLI args: {args}")
+
+        if not args or args[0].startswith("-"):
+            return self.cli()
+        elif args[0] in CLIDecorator._projects:
+            return CLIDecorator._projects[args[0]]()
+        else:
+            return self.cli()
+
     class CMDManager:
-        def __init__(self):
-            self.cli = CLIDecorator._top_level
-
-        @mileslib
-        def launch(self):
-            args = sys.argv[1:]
-            print(f"[debug] CLI args: {args}")
-            if not args or args[0].startswith("-"):
-                return self.cli()
-            elif args[0] in CLIDecorator._projects:
-                return CLIDecorator._projects[args[0]]()
-            else:
-                return self.cli()
-
-        # ──────── Top-Level Commands ─────────
-        class Core:
-            @staticmethod
-            @mileslib_cli()
-            @click.argument("project_name")
-            def init(ctx, project_name):
-                try:
-                    print(f"[init] Creating project: {project_name}")
-                except RuntimeError as e:
-                    click.echo(str(e))
-                    raise click.Abort()
-
-        # ──────── Project-Scoped Commands ────────
+        pass
+        class Global:
+            pass
         class Project:
-            @staticmethod
-            @mileslib_cli(project_only=True)
-            @click.option("--repair", is_flag=True, help="Attempt to auto-repair any failed checks.")
-            def diagnostic(ctx):
-                try:
-                    project = ctx.obj["project"]
-                    path = ctx.obj["project_path"]
-                    print(f"[init] Running diagnostics for {project}...")
-                except Exception as e:
-                    click.echo(f"[error] Diagnostic failed: {e}")
-                    raise click.Abort()
+            pass
+
+def main():
+    CLIDecorator.auto_register_groups()
+    CLI().entry()
+
+if __name__ == "__main__":
+    main()
