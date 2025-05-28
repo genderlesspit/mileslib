@@ -1,9 +1,14 @@
 import builtins
+import contextvars
 import shutil
 import uuid
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 from unittest import mock
+from urllib.parse import urlparse
+
+import msal
 import pytest
 import importlib.util
 import requests
@@ -20,6 +25,8 @@ import os
 import tempfile
 import zipfile
 from datetime import datetime
+
+import uvicorn
 import yaml
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
@@ -33,7 +40,17 @@ from typing import TYPE_CHECKING
 import threading
 import inspect
 
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 from jinja2 import Environment, select_autoescape, FileSystemLoader
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+import threading
+import time
+import uvicorn
+from functools import wraps
+from typing import Callable
 
 if TYPE_CHECKING:
     LOG: Any  # let IDEs think it's there
@@ -495,7 +512,6 @@ class StaticMethods:
                 raise FileNotFoundError(f"[FileIO.read] File not found: {path}")
 
             ext = StaticMethods.FileIO.resolve_extension(path)
-            print(f"[FileIO] Reading {ext} config from {path}")
 
             if ext == "toml":
                 import toml
@@ -523,7 +539,7 @@ class StaticMethods:
                 return {"content": path.read_text(encoding="utf-8")}
 
             else:
-                raise ValueError(f"[FileIO.read] Unsupported config format: {ext}")
+                raise ValueError(f"[FileIO.read] Unsupported format: {ext}")
 
         @staticmethod
         def write(
@@ -550,7 +566,6 @@ class StaticMethods:
                 ImportError: If PyYAML is missing for .yml/.yaml.
             """
             ext = StaticMethods.FileIO.resolve_extension(path)
-            print(f"[FileIO] Writing {ext} config to {path}")
 
             if ext not in StaticMethods.FileIO.SUPPORTED_FORMATS:
                 raise ValueError(f"[FileIO] Unsupported file extension: .{ext}")
@@ -583,7 +598,6 @@ class StaticMethods:
             merged_data = {}
 
             if not overwrite and path.exists():
-                print("[FileIO] File exists — merging data")
                 existing = StaticMethods.FileIO.read(path)
 
                 if ext in ("toml", "json", "yaml", "yml"):
@@ -597,7 +611,6 @@ class StaticMethods:
                 else:
                     merged_data = StaticMethods.FileIO._merge(existing, data, replace_existing)
             else:
-                print("[FileIO] Overwriting existing config")
                 if ext in ("toml", "json", "yaml", "yml"):
                     merged_data = {section: data} if section else data
                 else:
@@ -638,7 +651,6 @@ class StaticMethods:
             Returns:
                 dict: Merged result.
             """
-            print(f"[FileIO] Merging config: replace_existing={replace}")
             merged = base.copy()
             for k, v in new.items():
                 if k not in merged or replace:
@@ -816,7 +828,6 @@ class MilesContext:
         @staticmethod
         def setup(path=None):
             path = path or ENV
-            print(f"[debug] Running setup with: {path} (type: {type(path)})")
 
             if path is None:
                 raise ValueError("[EnvLoader.setup] Path resolution failed — 'path' is None.")
@@ -843,12 +854,13 @@ class MilesContext:
             path = path or ENV
 
             def try_read():
-                print(f"[debug] Attempting to read env at: {path}")
                 return sm.read(path)
 
             def try_setup():
-                print(f"[debug] Attempting to create env at: {path}")
                 return MilesContext.EnvLoader.setup(path)
+
+            if MilesContext.EnvLoader._cache:
+                return MilesContext.EnvLoader._cache
 
             env_dict = sm.recall(try_read, try_setup)
 
@@ -1160,8 +1172,8 @@ class MilesContext:
         @staticmethod
         def load(path: Path = GLOBAL_CFG_FILE) -> dict:
             loaded_cfg = sm.recall(
-                lambda: MilesContext.Config.build(path),  # <- primary attempt
-                lambda: MilesContext.Config.dump(path)  # <- fallback / fix
+                lambda: MilesContext.Config.dump(path),  # <- primary attempt
+                lambda: MilesContext.Config.build(path)  # <- fallback / fix
             )
             return loaded_cfg
 
@@ -1178,7 +1190,6 @@ class MilesContext:
             """
             MilesContext.Config.load(path=path)
             data = MilesContext.Config.dump(path=path)
-            print(f"[cfg.get] Full config content: {data}")
             return data
 
         @staticmethod
@@ -1299,10 +1310,37 @@ class MilesContext:
     cfg_write = Config.write
     cfg_validate = Config.validate
 
+    # ─── Hierarchical Call Stack Tracking ─────────────────────────────────────────
+
+    # A context variable holding the current call‐stack as a list of function names
+    _call_stack = contextvars.ContextVar("_call_stack", default=[])
+
+    @contextmanager
+    def log_func(name: str):
+        """
+        Context manager to push/pop a function name onto the call stack.
+        """
+        stack = MilesContext._call_stack.get()
+        token = MilesContext._call_stack.set(stack + [name])
+        try:
+            yield
+        finally:
+            MilesContext._call_stack.reset(token)
+
+    def _enrich_record(record):
+        """
+        Loguru patch function: injects extra['func'] = dot-joined call stack.
+        """
+        stack = MilesContext._call_stack.get()
+        record["extra"]["func"] = ".".join(stack) if stack else ""
+        return record
+
+    # ─── Logger Utility ───────────────────────────────────────────────────────────
+
     class Logger:
         """
-        Logger utility using loguru with UUID-tagged session identity.
-        Prevents multiple handler attachments and tracks log instances.
+        Logger utility using loguru with UUID‐tagged session identity.
+        Adds a patch to include hierarchical func names in every record.
         """
 
         _configured = False
@@ -1329,67 +1367,70 @@ class MilesContext:
         ):
             """
             Initialize the loguru logger with optional file and console output.
-
-            Args:
-                log_dir (Path): Directory to write log files into.
-                label (str): Optional label suffix for log filename.
-                serialize (bool): Whether to serialize log output to JSON.
-                pretty_console (bool): Whether to include console output.
-                level (str): Logging level for both outputs.
+            Logs include a hierarchical func name from the call stack.
             """
             if MilesContext.Logger._configured:
                 return MilesContext.Logger._logger
 
             loguru = MilesContext.Logger.try_import_loguru()
             logger = loguru.logger
+
+            # One‐time configuration
             MilesContext.Logger._uuid = str(uuid.uuid4())
             MilesContext.Logger._configured = True
 
+            # Ensure log directory exists
             log_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
-            label_suffix = f"__{MilesContext.Logger._uuid}" if label is None else f"__{label}"
-            log_file = log_dir / f"{timestamp}{label_suffix}.log"
+            suffix = f"__{label}" if label else f"__{MilesContext.Logger._uuid}"
+            log_file = log_dir / f"{timestamp}{suffix}.log"
             MilesContext.Logger._log_path = log_file
 
-            # Remove any default handlers to avoid log duplication
+            # Remove default handlers
             logger.remove()
+
+            # Patch to enrich each record with our call stack (pass the function, don’t call it)
+            logger = logger.patch(MilesContext._enrich_record)
+
+            # Format: time | LEVEL | func.hierarchy | message
+            fmt = (
+                "<green>{time:HH:mm:ss.SSS}</green> | "
+                "<level>{level: <8}</level> | "
+                "<cyan>{extra[func]}</cyan> | "
+                "{message}"
+            )
 
             # Console handler
             if pretty_console:
-                MilesContext.Logger._handler_ids.console = logger.add(sys.stderr, level=level, colorize=True, enqueue=True)
+                MilesContext.Logger._handler_ids.console = logger.add(
+                    sys.stderr, level=level, colorize=True, enqueue=True, format=fmt
+                )
 
             # File handler
-            MilesContext.Logger._handler_ids.file = logger.add(str(log_file), level=level, serialize=serialize, enqueue=True)
-
-            logger.debug(f"[Logger Init] UUID={MilesContext.Logger._uuid} | Handlers=1, 2 → {log_file}")
+            MilesContext.Logger._handler_ids.file = logger.add(
+                str(log_file), level=level, serialize=serialize, enqueue=True, format=fmt
+            )
+            # Initial debug
+            logger.debug("[Logger Init] UUID={} → {}", MilesContext.Logger._uuid, log_file)
             MilesContext.Logger._logger = logger
             return logger
 
         @staticmethod
         def get_loguru():
-            """
-            Get the initialized loguru logger instance. Raises error if not configured.
-            """
             if not MilesContext.Logger._configured:
-                raise RuntimeError("Logger has not been initialized. Call Logger.init_logger() first.")
+                raise RuntimeError("Logger has not been initialized.")
             return MilesContext.Logger._logger
 
         @staticmethod
         def diagnostics():
-            """
-            Print current logger diagnostics including UUID and active handlers.
-            """
             print("Logger Diagnostics:")
             print(f"  UUID:       {MilesContext.Logger._uuid}")
             print(f"  Configured: {MilesContext.Logger._configured}")
             print(f"  Log Path:   {MilesContext.Logger._log_path}")
-            print(f"  Handler ID: console={MilesContext.Logger._handler_ids.console}, file={MilesContext.Logger._handler_ids.file}")
+            print(f"  Handlers:   console={MilesContext.Logger._handler_ids.console}, file={MilesContext.Logger._handler_ids.file}")
 
         @staticmethod
         def reset():
-            """
-            Reset logger state. Only use in test teardown.
-            """
             if MilesContext.Logger._logger:
                 MilesContext.Logger._logger.remove()
             MilesContext.Logger._configured = False
@@ -1398,171 +1439,296 @@ class MilesContext:
             MilesContext.Logger._log_path = None
             MilesContext.Logger._handler_ids = SimpleNamespace(file=None, console=None)
 
+    class AsyncCallbacks:
+        """
+        Temporary FastAPI-based async callback server for OAuth or webhook-like flows.
+        Can be used as a decorator to pause function execution until a callback is received.
+        """
+
+        _app = FastAPI()
+        _lock = threading.Lock()
+        _result = None
+        _triggered = False
+        _server_thread = None
+
+        @staticmethod
+        def async_callback(path: str = "/callback", timeout: float = 60):
+            """
+            Decorator to enable temporary FastAPI callback for async flows (e.g. OAuth).
+            Blocks execution until a GET request hits the specified path.
+
+            Args:
+                path (str): Endpoint path to register for callback (default /callback)
+                timeout (float): Max seconds to wait for the callback before proceeding
+
+            Returns:
+                Callable: Decorator that pauses function execution until callback received
+            """
+
+            def decorator(fn: Callable[[dict], None]):
+                @wraps(fn)
+                def wrapper(*args, **kwargs):
+                    with MilesContext.AsyncCallbacks._lock:
+                        if not MilesContext.AsyncCallbacks._server_thread:
+                            @MilesContext.AsyncCallbacks._app.get(path)
+                            async def callback(req: Request):
+                                MilesContext.AsyncCallbacks._result = dict(req.query_params)
+                                MilesContext.AsyncCallbacks._triggered = True
+                                return JSONResponse({"status": "received"})
+
+                            MilesContext.AsyncCallbacks._server_thread = threading.Thread(
+                                target=lambda: uvicorn.run(
+                                    MilesContext.AsyncCallbacks._app,
+                                    host="127.0.0.1",
+                                    port=8000,
+                                    log_level="error"
+                                ),
+                                daemon=True
+                            )
+                            MilesContext.AsyncCallbacks._server_thread.start()
+                            print(f"[AsyncCallbacks] Waiting for callback on {path}...")
+
+                    start = time.time()
+                    while not MilesContext.AsyncCallbacks._triggered and (time.time() - start < timeout):
+                        time.sleep(0.5)
+
+                    if not MilesContext.AsyncCallbacks._triggered:
+                        print(f"[AsyncCallbacks] Timeout waiting for callback at {path}")
+
+                    return fn(MilesContext.AsyncCallbacks._result or {}, *args, **kwargs)
+
+                return wrapper
+
+            return decorator
+
     class Decorator:
         """
-        MilesLib-compatible decorators with full log capture for print and echo,
-        and optional retry/fix logic using StaticMethods.
+        MilesLib-compatible decorator with full log capture for print/echo,
+        retry/fix, timed, safe modes, and hierarchical func-name context.
         """
 
         @staticmethod
         def mileslib(
                 *,
                 retry: bool = False,
-                fix: Optional[Union[Callable, List[Callable]]] = None,
+                fix: Optional[Union[callable, list]] = None,
                 timed: bool = True,
                 logged: bool = True,
                 safe: bool = True,
                 env: bool = True,
+                callback: Optional[str] = None,
                 label: Optional[str] = None,
         ):
-            def decorator(fn: Callable):
+            def decorator(fn):
+                # Unwrap staticmethod/classmethod
                 if isinstance(fn, (staticmethod, classmethod)):
                     fn = fn.__func__
                 uid = uuid.uuid4().hex[:8]
-                name = label or fn.__name__
 
                 @wraps(fn)
                 def wrapper(*args, **kwargs):
-                    # Ensure logger is initialized first
-                    MilesContext.Logger.init_logger()
-                    log = MilesContext.Logger.get_loguru()
-                    log.debug(f"[{name}] 🎯 Entering decorator {uid}")
+                    name = fn.__qualname__
+                    with MilesContext.log_func(name):
+                        log = MilesContext.Decorator._init_logger()
+                        MilesContext.Decorator._hijack_stdout(log, name)
+                        MilesContext.Decorator._inject_globals(fn, log)
 
-                    # Inject LOG + env into global namespace
-                    fn.__globals__["LOG"] = log
-                    for k, v in MilesContext.EnvLoader.load_env().items():
-                        if k.isidentifier() and k.isupper():
-                            fn.__globals__[k] = v
+                        try:
+                            if env:
+                                MilesContext.Decorator._apply_env_overrides(log, name)
+                            MilesContext.Decorator._inject_env_kwargs(fn, kwargs, log)
 
-                    # ── Hijack only once ───────────────────────────────────────
-                    is_log_parent = not hasattr(thread_local, "hijack_depth") or thread_local.hijack_depth == 0
-                    if is_log_parent:
-                        thread_local.hijack_depth = 1
-                        thread_local.orig_print = builtins.print
-                        thread_local.orig_echo = click.echo
-                        builtins.print = lambda *a, **k: log.info(" ".join(map(str, a)))
-                        click.echo = lambda *a, **k: log.info(" ".join(map(str, a)))
-                    else:
-                        thread_local.hijack_depth += 1
+                            core_fn = MilesContext.Decorator._build_core(
+                                fn, args, kwargs, timed, logged, callback, log
+                            )
 
-                    try:
-                        # ── Load + apply env overrides ────────────────────────
-                        if env:
-                            log.debug(f"[{name}] Loading .env + config overrides")
-                            MilesContext.EnvLoader.load_env()
-                            try:
-                                MilesContext.Config.apply_env(overwrite=True)
-                            except Exception as e:
-                                log.warning(f"[{name}] Failed to apply config overrides: {e}")
+                            if retry:
+                                return MilesContext.Decorator._execute_retry(core_fn, fix, name, log)
+                            if safe:
+                                return MilesContext.Decorator._execute_safe(core_fn, name, log)
 
-                        # ── Inject env vars into kwargs ───────────────────────
-                        env_cache = MilesContext.EnvLoader._cache
-                        sig = inspect.signature(fn)
-                        accepted_keys = set(sig.parameters)
-                        for k, v in env_cache.items():
-                            if k in accepted_keys and k not in kwargs:
-                                kwargs[k] = v
-
-                        # ── Core logic ────────────────────────────────────────
-                        def core():
-                            if logged:
-                                log.info(f"[{name}] Calling with args={args}, kwargs={kwargs}")
-                            if timed:
-                                start = time.perf_counter()
-                            result = fn(*args, **kwargs)
-                            if timed:
-                                duration = time.perf_counter() - start
-                                log.info(f"[{name}] Completed in {duration:.3f}s")
-                            return result
-
-                        if retry:
-                            if fix:
-                                if not callable(fix):
-                                    raise TypeError(f"[{name}] fix must be callable, got {type(fix)}")
-                                return StaticMethods.ErrorHandling.recall(core, fix=fix, label=name)
-                            return StaticMethods.ErrorHandling.attempt(core, label=name)
-
-                        if safe:
-                            try:
-                                return core()
-                            except Exception as e:
-                                log.warning(f"[{name}] Exception caught in safe mode: {e}")
-                                return None
-
-                        return core()
-
-                    finally:
-                        thread_local.hijack_depth -= 1
-                        if thread_local.hijack_depth == 0:
-                            builtins.print = thread_local.orig_print
-                            click.echo = thread_local.orig_echo
-                            del thread_local.hijack_depth
-                            del thread_local.orig_print
-                            del thread_local.orig_echo
+                            return core_fn()
+                        finally:
+                            MilesContext.Decorator._restore_stdout(name)
 
                 return wrapper
 
             return decorator
 
-        # ──────────────────────────── Helper Methods ─────────────────────────────
+        # ─── Helper Methods ─────────────────────────────────────────────────────────
 
         @staticmethod
-        def _inject_globals(fn, log):
-            fn.__globals__["LOG"] = log
-            for k, v in MilesContext.EnvLoader.load_env().items():
-                if k.isidentifier() and k.isupper():
-                    fn.__globals__[k] = v
+        def _init_logger() -> "loguru.Logger":
+            """
+            Initialize the loguru logger (once) and return it.
+            """
+            # defined variables
+            logger = None
+
+            # logic
+            Logger = MilesContext.Logger
+            Logger.init_logger()
+            logger = Logger.get_loguru()
+            logger.debug("[Decorator] Logger initialized")
+            return logger
 
         @staticmethod
-        def _inject_env_kwargs(fn, kwargs):
-            sig = inspect.signature(fn)
-            accepted = set(sig.parameters)
-            env_cache = MilesContext.EnvLoader._cache
-            for k, v in env_cache.items():
-                if k in accepted and k not in kwargs:
-                    kwargs[k] = v
+        def _hijack_stdout(log, name: str):
+            """
+            Redirect builtins.print and click.echo to the logger, tracking depth.
+            """
+            # logic
+            depth = getattr(MilesContext.log_func, "_hijack_depth", 0)
+            log.debug(f"[{name}] Hijack stdout (depth={depth})")
+
+            if depth == 0:
+                MilesContext.log_func._orig_print = builtins.print
+                MilesContext.log_func._orig_echo = click.echo
+                builtins.print = lambda *a, **k: log.info("{}", " ".join(map(str, a)))
+                click.echo = lambda *a, **k: log.info("{}", " ".join(map(str, a)))
+            MilesContext.log_func._hijack_depth = depth + 1
+            log.debug(f"[{name}] Hijack depth now {MilesContext.log_func._hijack_depth}")
 
         @staticmethod
-        def _apply_env_overrides(log, name):
-            log.debug(f"[{name}] Loading .env + config overrides")
+        def _restore_stdout(name: str):
+            """
+            Restore builtins.print and click.echo to their originals.
+            """
+            log = MilesContext.Logger.get_loguru()
+            depth = getattr(MilesContext.log_func, "_hijack_depth", 1) - 1
+            log.debug(f"[{name}] Restore stdout (depth={depth})")
+
+            if depth == 0:
+                builtins.print = MilesContext.log_func._orig_print
+                click.echo = MilesContext.log_func._orig_echo
+                delattr(MilesContext.log_func, "_hijack_depth")
+                delattr(MilesContext.log_func, "_orig_print")
+                delattr(MilesContext.log_func, "_orig_echo")
+            else:
+                MilesContext.log_func._hijack_depth = depth
+
+            log.debug(f"[{name}] Hijack depth now {depth}")
+
+        @staticmethod
+        def _apply_env_overrides(log, name: str):
+            """
+            Load .env and apply Config overrides, warning on failure.
+            """
+            # logic
+            log.debug(f"[{name}] Applying .env + config overrides")
             MilesContext.EnvLoader.load_env()
             try:
                 MilesContext.Config.apply_env(overwrite=True)
             except Exception as e:
-                if "ext" in str(e):
-                    log.warning(f"[{name}] Did you mistakenly pass 'ext' to FileIO.write?")
-                log.warning(f"[{name}] Failed to apply config overrides: {e}")
+                log.warning(f"[{name}] Override failure: {e}")
 
         @staticmethod
-        def _hijack_stdout(log):
-            thread_local.orig_print = builtins.print
-            thread_local.orig_echo = click.echo
-            builtins.print = lambda *a, **k: log.info(" ".join(map(str, a)))
-            click.echo = lambda *a, **k: log.info(" ".join(map(str, a)))
+        def _inject_env_kwargs(fn, kwargs: dict, log):
+            """
+            Inject any cached env vars into kwargs if the function signature accepts them.
+            """
+            # defined variables
+            sig = inspect.signature(fn)
+            env_cache = MilesContext.EnvLoader._cache
+
+            # logic
+            for k, v in env_cache.items():
+                if k in sig.parameters and k not in kwargs:
+                    kwargs[k] = v
+                    log.debug(f"[{fn.__qualname__}] Injected env var {k}={v}")
 
         @staticmethod
-        def _restore_stdout():
-            builtins.print = thread_local.orig_print
-            click.echo = thread_local.orig_echo
+        def _inject_globals(fn, log):
+            try:
+                fn.__globals__["log"] = log  # type: ignore
+                fn.__globals__["requests_session"] = BackendMethods.Requests.session  # type: ignore
+                for k, v in MilesContext.EnvLoader.load_env().items():
+                    if k.isidentifier() and k.isupper():
+                        fn.__globals__[k] = v  # type: ignore
+            except AttributeError:
+                log.warning("Function has no __globals__; skipping global injection")
+
+        @staticmethod
+        def _build_core(fn, args: tuple, kwargs: dict, timed: bool, logged: bool, callback: Optional[str],
+                        log) -> Callable:
+            """
+            Construct the actual core call logic, including timing, logging, and callbacks.
+            """
+
+            # defined sub-function
+            def _core():
+                # logic
+                if logged:
+                    log.info(f"[{fn.__qualname__}] Calling with args={args}, kwargs={kwargs}")
+                if timed:
+                    start = time.perf_counter()
+
+                if callback:
+                    @MilesContext.AsyncCallbacks.async_callback(path=callback)
+                    def _with_cb(data):
+                        log.debug(f"[{fn.__qualname__}] Received callback data: {data}")
+                        return fn(*args, **kwargs)
+
+                    result = _with_cb()
+                else:
+                    result = fn(*args, **kwargs)
+
+                if timed:
+                    dur = time.perf_counter() - start
+                    log.info(f"[{fn.__qualname__}] Completed in {dur:.3f}s")
+
+                return result
+
+            log.debug(f"[{fn.__qualname__}] Core function constructed")
+            return _core
+
+        @staticmethod
+        def _execute_retry(core_fn: Callable, fix, name: str, log):
+            """
+            Run core_fn with retry/fix logic.
+            """
+            # logic
+            log.debug(f"[{name}] Executing with retry (fix={fix})")
+            return MilesContext.Decorator._attempt(core_fn, fix, name)
+
+        @staticmethod
+        def _execute_safe(core_fn: Callable, name: str, log):
+            """
+            Run core_fn in safe mode, catching exceptions and returning None on failure.
+            """
+            # logic
+            log.debug(f"[{name}] Executing in safe mode")
+            try:
+                return core_fn()
+            except Exception as e:
+                log.exception(f"[{name}] Exception in safe mode: {e}")
+                return None
+
+        @staticmethod
+        def _attempt(core_fn: Callable[[], Any],
+                     fix: Optional[Union[Callable[[], None], List[Callable[[], None]]]],
+                     label: str) -> Any:
+            """
+            Runs core_fn with retries and optional fix logic using StaticMethods.ErrorHandling.
+            """
+            if fix:
+                return StaticMethods.ErrorHandling.recall(core_fn, fix)
+            return StaticMethods.ErrorHandling.attempt(core_fn, fix=None, label=label)
 
     @staticmethod
-    def mileslib(fn: Optional[Callable] = None, **kwargs):
+    def shim(fn: Optional[Callable] = None, **kwargs):
         """
-        Flexible decorator shim that supports both:
-        - @mileslib
-        - @mileslib(...)
+        Supports both @mileslib and @mileslib(...) usage.
         """
         if fn is not None and callable(fn) and not kwargs:
-            # Case: @mileslib
             return MilesContext.Decorator.mileslib()(fn)
         elif fn is None or callable(fn):
-            # Case: @mileslib(...)
             return MilesContext.Decorator.mileslib(**kwargs)
         else:
             raise TypeError("Invalid usage of @mileslib")
 
 mc = MilesContext
-mileslib = mc.mileslib
+mileslib = mc.shim
 ROOT = Path(mc.env.get("global_root"))
 
 DEFAULT_PROJECT_NAME = "default_project"
@@ -1572,68 +1738,108 @@ SEL_PROJECT_NAME = CURRENT_PROJECT_NAME or DEFAULT_PROJECT_NAME
 AZURE_CRED = DefaultAzureCredential()
 
 class BackendMethods:
+    import threading, time, uvicorn
+    from fastapi import FastAPI, Request
+    from starlette.responses import JSONResponse
+    from functools import wraps
+    from typing import Callable
+
     class Requests:
-        @staticmethod
-        @mileslib
-        def http_get(url: str, retries: int = 3) -> requests.Response:
-            """
-            Perform an HTTP GET request with retry logic and logging.
+        """
+        Centralized HTTP client with shared session, retries, and logging.
 
-            Args:
-                url (str): The URL to send the GET request to.
-                retries (int): Number of retry attempts if the request fails. Default is 3.
+        All methods use the shared `requests.Session` and `@mileslib` for logging, retries, timing, and safe mode.
+        """
 
-            Returns:
-                requests.Response: The HTTP response object.
-
-            Raises:
-                requests.HTTPError: If the request fails after all retries.
-                TypeError: If input types are incorrect.
-            """
-            sm.try_import("requests")
-            sm.check_input(url, str, "url")
-            sm.check_input(retries, int, "retries")
-            print(f"Starting GET request at {url}")
-
-            # define the single‐try function
-            def _do_get():
-                resp = requests.get(url)
-                resp.raise_for_status()
-                return resp
-
-            # delegate retry logic
-            return sm.attempt(_do_get, retries=retries)
+        # Shared session for connection pooling and cookie reuse
+        session = requests.Session()
 
         @staticmethod
-        @mileslib
-        def http_post(url: str, data: dict, retries: int = 3) -> requests.Response:
+        def _do_request(
+                method: str,
+                url: str,
+                *,
+                data=None,
+                json=None,
+                headers=None,
+                timeout: float = 5.0
+        ) -> requests.Response:
             """
-            Perform an HTTP POST request with a JSON payload, including retry logic and logging.
+            Core request logic used by all HTTP wrappers.
 
             Args:
-                url (str): The URL to send the POST request to.
-                data (dict): The JSON-serializable data to include in the POST body.
-                retries (int): Number of retry attempts if the request fails. Default is 3.
+                method (str): HTTP method name, e.g. 'get', 'post'.
+                url (str): Full URL to request.
+                data/json (dict): Optional request payload.
+                headers (dict): Optional headers.
+                timeout (float): Request timeout in seconds.
 
             Returns:
-                requests.Response: The HTTP response object.
-
-            Raises:
-                requests.HTTPError: If the request fails after all retries.
-                TypeError: If input types are incorrect.
+                Response object, or raises HTTPError.
             """
             sm.try_import("requests")
+            sm.check_input(method, str, "method")
             sm.check_input(url, str, "url")
+
+            method = method.lower()
+            req = getattr(BackendMethods.Requests.session, method)
+            resp = req(url, data=data, json=json, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            return resp
+
+        @staticmethod
+        @mileslib(retry=True, timed=True, logged=True)
+        def http_get(url: str, retries: int = 3, timeout: float = 5.0) -> requests.Response:
+            """
+            HTTP GET with retries and decorator integration.
+
+            Args:
+                url (str): URL to GET.
+                retries (int): Retry attempts.
+                timeout (float): Timeout in seconds.
+
+            Returns:
+                Response object.
+            """
+            return sm.attempt(lambda: BackendMethods.Requests._do_request("get", url, timeout=timeout), retries=retries)
+
+        @staticmethod
+        @mileslib(retry=True, timed=True, logged=True)
+        def http_post(url: str, data: dict, retries: int = 3, timeout: float = 5.0) -> requests.Response:
+            """
+            HTTP POST with retries and JSON payload.
+
+            Args:
+                url (str): URL to POST to.
+                data (dict): JSON payload.
+                retries (int): Retry attempts.
+                timeout (float): Timeout in seconds.
+
+            Returns:
+                Response object.
+            """
             sm.check_input(data, dict, "data")
-            sm.check_input(retries, int, "retries")
-            print(f"Starting POST request at {url} with payload: {data}")
+            return sm.attempt(lambda: BackendMethods.Requests._do_request("post", url, json=data, timeout=timeout), retries=retries)
 
-            def _do_post():
-                resp = requests.post(url, json=data)
-                resp.raise_for_status()
-                return resp
+        @staticmethod
+        @mileslib(retry=True, timed=True, logged=True, safe=True)
+        def ensure_endpoint(url: str, timeout: float = 3.0) -> bool:
+            """
+            Check if an HTTP endpoint is up and responds 2xx or 3xx.
 
-            return sm.attempt(_do_post, retries=retries)
+            Args:
+                url (str): URL to check.
+                timeout (float): Timeout in seconds.
+
+            Returns:
+                True if reachable, False otherwise.
+            """
+            try:
+                resp = BackendMethods.Requests._do_request("get", url, timeout=timeout)
+                return 200 <= resp.status_code < 400
+            except Exception as e:
+                print(f"[ensure_endpoint] Request failed: {e}")
+                return False
 
     http_get = Requests.http_get
     http_post = Requests.http_post
@@ -1932,131 +2138,498 @@ class BackendMethods:
             output_path.write_text(rendered, encoding="utf-8")
             print(f"[template] Wrote: {output_path}")
 
+bm = BackendMethods
+
+class ProjectAwareGroup(click.Group):
+    def format_commands(self, ctx, formatter):
+        commands = self.list_commands(ctx)
+        if not commands:
+            return
+
+        global_cmds, project_grps = [], []
+        for name in commands:
+            cmd = self.get_command(ctx, name)
+            if isinstance(cmd, click.Group) and name in CLIDecorator._projects:
+                project_grps.append((name, cmd))
+            else:
+                global_cmds.append((name, cmd))
+
+        # Global
+        if global_cmds:
+            with formatter.section("Global Commands"):
+                entries = [(n, c.help or "") for n, c in global_cmds]
+                try:
+                    formatter.write_dl(entries)
+                except TypeError:
+                    for n, h in entries:
+                        formatter.write_text(f"  {n}\t{h}\n")
+
+        # Per-project
+        for pname, grp in project_grps:
+            with formatter.section(f"Project Commands: {pname}"):
+                subs = [(n, c.help or "") for n, c in grp.commands.items()]
+                try:
+                    formatter.write_dl(subs)
+                except TypeError:
+                    for n, h in subs:
+                        formatter.write_text(f"  {n}\t{h}\n")
+
 class CLIDecorator:
-    _global = click.Group(invoke_without_command=True)  # formerly _top_level
+    _global = ProjectAwareGroup(invoke_without_command=True)
     _projects = {}
+    _project_only_cmds = []         # ← collect these here
 
     @staticmethod
+    @mileslib
     def auto_register_groups():
-        """
-        Automatically register CLI command groups from CMDManager.Core and CMDManager.Project.
-        """
-        groups = {
-            "core": (CLI.CMDManager.Core, False),
-            "project": (CLI.CMDManager.Project, True),
-        }
+        # 1) discover and register each project subgroup
+        for sub in ROOT.iterdir():
+            cfg = sub / f"mileslib_{sub.name}_settings.toml"
+            if not cfg.exists():
+                continue
 
-        for group_name, (cls, project_only) in groups.items():
-            group = click.Group(name=group_name)
+            proj_name = sub.name
+            if proj_name not in CLIDecorator._projects:
+                @click.group(name=proj_name, cls=ProjectAwareGroup)
+                @click.pass_context
+                def _grp(ctx):
+                    ctx.ensure_object(dict)
+                    ctx.obj["project_name"]      = proj_name
+                    ctx.obj["project_path"] = sub
 
-            for attr in dir(cls):
-                if attr.startswith("_"):
-                    continue
-                method = getattr(cls, attr)
-                if not isinstance(method, staticmethod):
-                    continue
+                CLIDecorator._projects[proj_name] = _grp
+                CLIDecorator._global.add_command(_grp)
 
-                fn = method.__func__
-                cmd = CLIDecorator.mileslib_cli(project_only=project_only)(fn)
-                group.add_command(cmd)
-
-            CLIDecorator._global.add_command(group)
+        for cmd in CLIDecorator._project_only_cmds:
+            for grp in CLIDecorator._projects.values():
+                grp.add_command(cmd)
 
     @staticmethod
-    def mileslib_cli(*, project_only: bool = False):
-        """
-        Decorator that converts a static method into a Click CLI command.
-        Automatically maps arguments based on the function's signature.
-        """
+    def mileslib_cli(*, project_only: bool = False, **mileslib_kwargs):
         def decorator(fn):
-            name = fn.__name__.replace("_", "-")
+            if isinstance(fn, staticmethod):
+                fn = fn.__func__
+
+            # Step A: wrap with your @mileslib
+            fn = MilesContext.Decorator.mileslib(**mileslib_kwargs)(fn)
+
+            # Step B: build the Click wrapper that only forwards args your fn wants
+            @click.pass_context
+            @wraps(fn)
+            def wrapper(ctx, *args, **kwargs):
+                sig = inspect.signature(fn)
+                accepted = set(sig.parameters) - {"ctx"}
+                safe_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+                return fn(ctx, *args, **safe_kwargs)
+
+            # Step C: attach click arguments/options
             sig = inspect.signature(fn)
-            params = list(sig.parameters.values())
+            for param in reversed(list(sig.parameters.values())[1:]):
+                ptype = str if param.annotation is inspect._empty else param.annotation
+                default = None if param.default is inspect._empty else param.default
+                dash = param.name.replace("_", "-")
+                if default is None:
+                    wrapper = click.argument(param.name, type=ptype)(wrapper)
+                else:
+                    wrapper = click.option(f"--{dash}", default=default, type=ptype)(wrapper)
 
-            def build_click_command():
-                @click.pass_context
-                @wraps(fn)
-                def wrapper(ctx, **kwargs):
-                    project = ctx.obj.get("project") if ctx.obj else None
-                    print(f"[cli] Running command '{name}' (project={project})")
-                    return fn(ctx, **kwargs)
+            # Step D: turn into a Click command
+            cmd_name = fn.__name__.replace("_", "-")
+            command = click.command(name=cmd_name, help=fn.__doc__)(wrapper)
 
-                for param in reversed(params[1:]):  # Skip 'ctx'
-                    param_type = str if param.annotation is inspect._empty else param.annotation
-                    default = param.default if param.default is not inspect._empty else None
-                    dash_name = param.name.replace("_", "-")
+            if project_only:
+                # collect it for later
+                CLIDecorator._project_only_cmds.append(command)
+            else:
+                # immediately stick it in the global group
+                CLIDecorator._global.add_command(command)
 
-                    if default is None:
-                        wrapper = click.argument(param.name, type=param_type)(wrapper)
-                    else:
-                        wrapper = click.option(f"--{dash_name}", default=default, type=param_type)(wrapper)
-
-                return click.command(name=name, help=fn.__doc__)(wrapper)
-
-            cmd = build_click_command()
-
-            def register_global():
-                if not project_only:
-                    CLIDecorator._global.add_command(cmd)
-
-            def register_project_scoped():
-                root_path = globals().get("ROOT", Path("."))
-                if not root_path.exists():
-                    return
-                for subdir in root_path.iterdir():
-                    if (subdir / "mileslib_project_settings.toml").exists():
-                        pname = subdir.name
-                        if pname not in CLIDecorator._projects:
-                            @click.group(name=pname)
-                            @click.pass_context
-                            def _group(ctx):
-                                ctx.ensure_object(dict)
-                                ctx.obj["project"] = pname
-                                ctx.obj["project_path"] = subdir
-                            CLIDecorator._projects[pname] = _group
-                        CLIDecorator._projects[pname].add_command(cmd)
-
-            register_global()
-            register_project_scoped()
-            return cmd
+            return command
 
         return decorator
 
-# Alias for convenience
+
+# alias so your decorators don’t change:
 mileslib_cli = CLIDecorator.mileslib_cli
 
 class CLI:
     """
     MilesLib CLI orchestrator.
     """
-
     def __init__(self):
-         self.cli = CLIDecorator._global  # renamed from _top_level
+        # also in case someone does CLI().entry() directly
+        CLIDecorator.auto_register_groups()
+        self.cli = CLIDecorator._global
 
     @mileslib
     def entry(self):
-        """
-        Entry point for MilesLib CLI execution.
-        Decides whether to run global CLI or a project-specific group.
-         """
-        args = sys.argv[1:]
-        print(f"[debug] CLI args: {args}")
-
-        if not args or args[0].startswith("-"):
-            return self.cli()
-        elif args[0] in CLIDecorator._projects:
-            return CLIDecorator._projects[args[0]]()
-        else:
-            return self.cli()
+        # no custom argv logic—let Click do the routing
+        return self.cli()
 
     class CMDManager:
-        pass
         class Global:
-            pass
+            class InitializeProject:
+                @staticmethod
+                @mileslib_cli(project_only=False)  # or True, depending on scope
+                def init_project(ctx, project_name: str):
+                    """
+                    Initializes a new project folder with Django scaffold and config.
+
+                    Args:
+                        project_name (str): Name of the project.
+
+                    Raises:
+                        click.Abort: On validation or subprocess failure.
+                    """
+
+                    # ─── Path Setup ─────────────────────────────────────────────
+                    try:
+                        root = sm.validate_directory(ROOT / project_name)
+                        proj_root = sm.validate_directory(root)
+                        proj_str = str(proj_root)
+                    except Exception as e:
+                        print(f"[init] Directory validation failed: {e}")
+                        raise click.Abort()
+
+                    cfg_path = root / f"mileslib_{project_name}_settings.toml"
+                    cfg = mc.Config.build(cfg_path)
+                    tests = root / "_tests"
+                    django_name = f"{project_name}_core"
+                    db_name = f"{project_name}_db"
+                    proj_details_list = {
+                        "project_name": project_name,
+                        "project_root": proj_root,
+                        "config_dir": cfg,
+                        "tests_dir": tests,
+                        "django_project": django_name,
+                        "database_name": db_name,
+                    }
+                    print("[debug] raw proj_details_list:", proj_details_list)
+                    proj_details = mc.Config.configify(proj_details_list)
+
+                    # ─── Django ────────────────────────────────────────────────
+                    def init_django():
+                        print("[init] Starting Django scaffold...")
+                        subprocess.run(
+                            ["python", "-m", "django", "startproject", django_name, proj_root],
+                            check=True
+                        )
+
+                    # ─── Folders ───────────────────────────────────────────────
+                    def init_folders():
+                        for d in [root, tests]:
+                            sm.validate_directory(d)
+
+                    # ─── Config (.toml) ─────────────────────────────────────────
+                    def init_config():
+                        mc.cfg_write(path=cfg, set=proj_details)
+
+                    # ─── Gitignore / Requirements / Readme ──────────────────────
+                    def scaffold_basics():
+                        (proj_root / ".gitignore").write_text(textwrap.dedent("""\
+                            __pycache__/
+                            *.pyc
+                            *.log
+                            .env
+                            .DS_Store
+                            db.sqlite3
+                            /postgres_data/
+                            /tmp/
+                            .pytest_cache/
+                            .venv/
+                            .mypy_cache/
+                            *.sqlite3
+                        """), encoding="utf-8")
+
+                        (proj_root / "requirements.txt").write_text(textwrap.dedent("""\
+                            #
+                            """), encoding="utf-8")
+
+                        (proj_root / "README.md").write_text(f"# {project_name}\n\nInitialized with MilesLib.\n",
+                                                             encoding="utf-8")
+
+                    try:
+                        init_django()
+                        init_folders()
+                        init_config()
+                        scaffold_basics()
+                        print(f"[init] Project '{project_name}' created successfully.")
+                    except Exception as e:
+                        print(f"[error] Initialization failed: {e}")
+                        if root.exists():
+                            shutil.rmtree(root)
+                        raise click.Abort()
+
         class Project:
-            pass
+            # FastAPI callback listener and nested AzureBootstrap
+            app = FastAPI()
+
+            class AzureBootstrap:
+                tenant_id = None
+                client_id = None
+                redirect_uri = None
+                required = ["tenant_id", "client_id", "redirect_uri"]
+
+                @staticmethod
+                @mileslib_cli(project_only=True, label="azure_boot")
+                def azure_bootstrap(ctx):
+                    """
+                    Bootstraps an Azure AD application using the project_name's config.
+                    """
+                    #Top-Level Vars
+                    project_name = ctx.obj["project_name"]
+                    proj_path = ctx.obj["project_path"]
+                    cfg_path = proj_path / f"mileslib_{project_name}_settings.toml"
+                    ab = CLI.CMDManager.Project.AzureBootstrap
+
+                    # Extract AAD settings
+                    def get_aad_settings(recall: bool = None) -> dict:
+                        sm.ensure_path(cfg_path)
+                        settings = {}
+
+                        def print_help_for_tenant_id():
+                            """
+                            Prints CLI-friendly guidance on how to retrieve your Azure AD Tenant ID.
+                            """
+                            print("How to find your Azure AD Tenant ID:")
+                            print("1. Visit the Azure Active Directory overview page:")
+                            print("   👉 https://portal.azure.com/#blade/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/Overview")
+                            print("2. Look for the 'Tenant ID' field — it will be a GUID (e.g., 12345678-90ab-cdef-1234-567890abcdef).")
+                            print("3. Copy and paste it when prompted.")
+
+                        def print_help_for_client_id():
+                            """
+                            Prints CLI-friendly guidance on how to retrieve your Azure AD Application (Client) ID.
+                            """
+                            print("How to find your Azure AD Application (Client) ID:")
+                            print("1. Open the App Registrations page:")
+                            print("   👉 https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade")
+                            print("2. Click on the application you've registered (or register a new one).")
+                            print("3. Copy the 'Application (client) ID' from the overview page.")
+                            print("4. Paste it here when prompted.")
+
+                        def alternatively():
+                            print(f"You can also can manually edit the config file here:")
+                            print(f"{cfg_path}")
+                            print("Under the [aad] section, provide:")
+                            print("tenant_id = \"your-tenant-guid\"")
+                            print("client_id = \"your-client-id\"")
+                            print("redirect_uri = \"http://localhost:8000/callback\"")
+
+                        for k in ab.required:
+                            v = None
+
+                            def validate_current_key():
+                                ab.ensure_valid_id(key=k, value=v)
+                                mc.cfg_write(path=cfg_path, set={"aad": {k: v}})
+                                setattr(ab, k, v)
+                                settings[k] = v
+                                print(f"[aad settings] Validated {k}: {v}")
+
+                            if recall is not True:
+                                try:
+                                    v = mc.cfg_get("aad", k, path=cfg_path)
+                                    validate_current_key()
+                                except Exception: v = None
+
+                            if v is None:
+                                time.sleep(1)
+                                log.error("[aad settings] Your tenant id is invalid or not present!") #type: ignore
+                                time.sleep(1)
+                                if k == "tenant_id":
+                                    print_help_for_tenant_id()
+                                elif k == "client_id":
+                                    print_help_for_client_id()
+                                time.sleep(1)
+                                alternatively()
+                                time.sleep(1)
+                                v = input(f"Please provide your {k}: ").strip()
+
+                            sm.recall(validate_current_key, lambda: get_aad_settings(recall=True))
+
+                            setattr(ab, k, v)
+                            print(f"Ensuring valid {k}...")
+                            settings[k] = v
+
+                        return settings
+
+                    aad_settings = get_aad_settings()
+
+                    def admin_consent():
+                        if not ab.consent_status(project_name):
+                            print("Launching admin consent flow...")
+                            try:
+                                ab.redirect_to_admin_consent(aad_settings)
+                                ab.wait_for_callback()
+                            except Exception as e:
+                                raise RuntimeError(f"Admin consent process failed!: {e}")
+                            print("Admin consent granted.")
+
+                    #Ensure Admin Consent Status
+                    admin_consent()
+
+                    # 2) App registration
+                    print("Registering AAD app '{}'...", project_name)
+                    app_id, object_id = ab.AAD.register_app(project_name)
+                    print("Registered appId={} objectId={}", app_id, object_id)
+
+                    # 3) Client secret
+                    print("Creating client secret for objectId={}...", object_id)
+                    secret = ab.AAD.add_client_secret(object_id)
+
+                    # 4) Vault storage
+                    print("Storing secrets in vault...")
+                    ab.Vault.store_secrets(app_id, secret, tenant_id)
+
+                    click.echo(f"✅ Azure bootstrap complete for '{project_name}'\n  AppId: {app_id}\n  Tenant: {tenant_id}")
+
+                @staticmethod
+                def ensure_valid_id(key: str, value: str):
+                    """
+                    Validates a single Azure AD identifier by checking against Microsoft endpoints.
+
+                    Args:
+                        key (str): One of ["tenant_id", "client_id", "redirect_uri"].
+                        value (str): The actual value to validate.
+
+                    Raises:
+                        RuntimeError: If key is unsupported or the identifier fails validation.
+                    """
+                    sm.check_input(key, str, "key")
+                    sm.check_input(value, str, "value")
+                    key = key.lower()
+
+                    if key == "tenant_id":
+                        url = f"https://login.microsoftonline.com/{value}/v2.0/.well-known/openid-configuration"
+                    elif key == "client_id":
+                        url = f"https://graph.microsoft.com/v1.0/applications?$filter=appId eq '{value}'"
+                    elif key == "redirect_uri":
+                        # Validate scheme + hostname format
+                        parsed = urlparse(value)
+                        if parsed.scheme not in ("https", "http") or not parsed.netloc:
+                            raise RuntimeError(f"[ensure_valid_id] Malformed redirect_uri: {value}")
+                        # Just check that the domain resolves at all
+                        url = value
+                    else:
+                        raise RuntimeError(f"[ensure_valid_id] Unsupported identifier type: {key}")
+
+                    if not BackendMethods.Requests.ensure_endpoint(url):
+                        raise RuntimeError(f"[ensure_valid_id] Validation failed for {key}: {value}")
+                    return True
+
+                @staticmethod
+                def consent_status(project_name, update: bool = None) -> bool:
+                    """
+                    :param update: If marked True or False, updates the env's recognition of consent.
+                    :return: bool: Returns update status.
+                    """
+                    k = f"{project_name}.azurebootstrap_user_has_consented"
+
+                    def update_env():
+                        u = str(update)
+                        mc.env.write(k, u)
+                        return mc.env.get(k)
+
+                    def check_env():
+                        dflt = str(False)
+                        c = (mc.env.get(k))
+                        if c is None:
+                            mc.env.write(k, dflt)
+                            return dflt
+                        return bool(c)
+
+                    if update: return update_env()
+                    else: return check_env()
+
+                @staticmethod
+                @mileslib(callback="/callback", logged=True)
+                def redirect_to_admin_consent(settings: dict):
+                    tenant_id = settings["tenant_id"]
+                    client_id = settings["client_id"]
+                    redirect_uri = settings["redirect_uri"]
+
+                    # Build the consent URL
+                    url = (
+                        f"https://login.microsoftonline.com/{tenant_id}/adminconsent"
+                        f"?client_id={client_id}&redirect_uri={redirect_uri}"
+                    )
+
+                    log.info(f"[aad] Opening admin consent flow in browser...") #type: ignore
+                    click.launch(url)
+
+                    # This function will pause until GET /callback is hit
+                    def handle_callback(data: dict):
+                        print(f"[aad] Admin consent granted: {data}")
+                        if "tenant" in data:
+                            print(f"[aad] Confirmed tenant ID: {data['tenant']}")
+                        else:
+                            print("[aad] Warning: No tenant ID in callback. Consent may have failed.")
+
+                    return handle_callback  # <-- async_callback wraps this
+
+                class MSALClient:
+                    @staticmethod
+                    def get_token():
+                        tenant = bm.Secrets.get("BOOTSTRAP_TENANT_ID")
+                        cid = bm.Secrets.get("BOOTSTRAP_CLIENT_ID")
+                        csec = bm.Secrets.get("BOOTSTRAP_CLIENT_SECRET")
+                        app = msal.ConfidentialClientApplication(
+                            client_id=cid,
+                            authority=f"https://login.microsoftonline.com/{tenant}",
+                            client_credential=csec
+                        )
+                        t = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
+                        return t.get("access_token")
+
+                class AAD:
+                    @staticmethod
+                    def register_app(name: str) -> tuple[str, str]:
+                        token = CLI.CMDManager.Project.AzureBootstrap.MSALClient.get_token()
+                        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                        payload = {"displayName": name, "signInAudience": "AzureADMyOrg"}
+                        resp = bm.http_post("https://graph.microsoft.com/v1.0/applications", payload)
+                        data = resp.json()
+                        return data["appId"], data["id"]
+
+                    @staticmethod
+                    def add_client_secret(obj_id: str) -> str:
+                        token = CLI.CMDManager.Project.AzureBootstrap.MSALClient.get_token()
+                        payload = {"passwordCredential": {"displayName": "AutoGenSecret"}}
+                        resp = bm.http_post(
+                            f"https://graph.microsoft.com/v1.0/applications/{obj_id}/addPassword",
+                            payload
+                        )
+                        return resp.json()["secretText"]
+
+                class Vault:
+                    @staticmethod
+                    def store_secrets(app_id: str, secret: str, tenant_id: str):
+                        bm.Secrets.set("aad-app-id", app_id)
+                        bm.Secrets.set("aad-app-secret", secret)
+                        bm.Secrets.set("aad-tenant-id", tenant_id)
+
+                class Registry:
+                    tenants_db = {}
+
+                    @staticmethod
+                    def update(tenant_id: str):
+                        CLI.CMDManager.Project.AzureBootstrap.Registry.tenants_db[tenant_id] = {
+                            "consented": True,
+                            "created_at": datetime.utcnow().isoformat(),
+                            "apps": []
+                        }
+
+            @app.get("/callback", response_model=None)
+            def handle_callback(request: Request):
+                if request.query_params.get("admin_consent") == "True":
+                    tid = request.query_params.get("tenant")
+                    CLI.CMDManager.Project.AzureBootstrap.Registry.update(tid)
+                    return PlainTextResponse("Consent successful! Close this window.")
+                return PlainTextResponse("Consent failed or denied.")
+
 
 def main():
+    # make sure groups exist *before* Click ever parses
     CLIDecorator.auto_register_groups()
     CLI().entry()
 
