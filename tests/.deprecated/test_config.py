@@ -2,8 +2,8 @@ import pytest
 import json
 import os
 from pathlib import Path
-from mileslib import StaticMethods as sm
-from mileslib import Logger as log
+from mileslib_core import StaticMethods as sm
+from mileslib_core import Logger as log
 
 class Main:
     def __init__(self, pdir = None):

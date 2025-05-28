@@ -5,7 +5,7 @@ from pathlib import Path
 # Add project root to sys.path manually
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from mileslib import sm
+from mileslib_core import sm
 
 from cli.commands import init_project as init
 from cli.commands import render_test_boilerplate as test

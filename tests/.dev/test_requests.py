@@ -1,5 +1,5 @@
-from mileslib import log
-from mileslib import sm
+from mileslib_core import log
+from mileslib_core import sm
 import pytest
 from unittest import mock
 from requests import Response, HTTPError

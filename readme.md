@@ -37,19 +37,19 @@ pip install -e .
 ### CLI: Initialize a project
 
 ```bash
-python mileslib.py init myproject
+python mileslib_core.py init myproject
 ```
 
 ### CLI: Render a test stub
 
 ```bash
-python mileslib.py render MyClass
+python mileslib_core.py render MyClass
 ```
 
 ### Programmatic Usage
 
 ```python
-from mileslib import MilesLib
+from mileslib_core import MilesLib
 
 ml = MilesLib()
 ml.logger.info("Logger is working")
@@ -466,7 +466,7 @@ project-name/
 
 ---
 
-### Day 2 (Tuesday): Template Engine + FastAPI Bootstrap
+### Day 2 (Tuesday): Template Engine + FastAPI AzureBootstrap
 
 **Goal:** Render FastAPI templates and create reusable template system.
 

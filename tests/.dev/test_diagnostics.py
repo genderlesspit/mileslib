@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Callable, Dict, Tuple
 import re
-from mileslib import StaticMethods as sm
+from mileslib_core import StaticMethods as sm
 
 CheckFn = Callable[[Dict], Tuple[str, str]]
 RepairFn = Callable[[Dict], None]

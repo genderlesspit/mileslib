@@ -1,4 +1,4 @@
-from mileslib import MilesLib
+from mileslib_core import MilesLib
 
 class App:
     def __init__(self, app):

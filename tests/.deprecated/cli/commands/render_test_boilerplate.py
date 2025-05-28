@@ -3,8 +3,8 @@ import os
 import sys
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
-from mileslib import StaticMethods as sm
-from mileslib import MilesLib
+from mileslib_core import StaticMethods as sm
+from mileslib_core import MilesLib
 import click
 
 def render_boilerplate(classname: str, mainname: str = "Main", pdir=None, logger=None):

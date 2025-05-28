@@ -1,7 +1,7 @@
 import click
 from pathlib import Path
-from mileslib import MilesLib
-from mileslib import sm, log
+from mileslib_core import MilesLib
+from mileslib_core import sm, log
 import subprocess
 import shutil
 

@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from mileslib import StaticMethods as sm
+from mileslib_core import StaticMethods as sm
 import toml
 import json
 import yaml

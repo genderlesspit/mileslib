@@ -3,7 +3,7 @@ import click
 from pathlib import Path
 import subprocess
 import shutil
-from mileslib import StaticMethods as sm
+from mileslib_core import StaticMethods as sm
 
 def init(project_name: str):
     PROJECT_NAME = project_name
