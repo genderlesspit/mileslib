@@ -44,7 +44,7 @@ import os
 import tempfile
 import zipfile
 from datetime import datetime
-
+import psutil
 import uvicorn
 import yaml
 from azure.identity import DefaultAzureCredential
@@ -90,29 +90,54 @@ import shlex
 import subprocess
 from shutil import which
 
+print("ENV['PATH']:\n", os.environ.get("PATH"))
+print("\nshutil.which('az'):", shutil.which("az"))
+
+try:
+    subprocess.run(["az", "--version"], check=True)
+except Exception as e:
+    print("subprocess failed:", e)
+
 class Subprocess:
     class CMD:
         @staticmethod
+        @staticmethod
         def run(
-            cmd: str | list,
-            *,
-            shell=False,
-            capture_output=True,
-            check=True,
-            text=True,
-            env=None,
-            force_global_shell=False
+                cmd: str | list,
+                *,
+                shell=False,
+                capture_output=True,
+                check=True,
+                text=True,
+                env=None,
+                force_global_shell=False
         ):
             """
             Runs a subprocess with optional global shell enforcement.
-            On Windows, `force_global_shell=True` runs in cmd.exe for system-level tools like winget.
+
+            Behavior:
+            - If `cmd` is a string and shell=False, it's split safely.
+            - On Windows, `.cmd` and `.bat` files are automatically wrapped with `cmd.exe /c`.
+            - If `force_global_shell=True`, `cmd.exe /c` is prepended regardless.
+            - Logs the final command to be run.
             """
+
+            system_is_windows = platform.system() == "Windows"
+
+            # Normalize string command input
             if isinstance(cmd, str) and not shell:
                 cmd = shlex.split(cmd)
 
-            if force_global_shell and platform.system() == "Windows":
+            # Auto-wrap .cmd/.bat on Windows if not already done
+            if isinstance(cmd, list) and system_is_windows:
+                first = cmd[0].lower()
+                if first.endswith(".cmd") or first.endswith(".bat"):
+                    cmd = ["cmd.exe", "/c"] + cmd
+
+            # Explicit force_global_shell wrapper
+            if force_global_shell and system_is_windows:
                 cmd = ["cmd.exe", "/c"] + cmd
-                shell = False
+                shell = False  # Ensure shell=False with manual cmd.exe call
 
             print(f"[CMD] Running: {cmd}")
             return subprocess.run(
@@ -193,10 +218,6 @@ class Subprocess:
                 "check": "rustc",
                 "powershell": "iwr https://sh.rustup.rs -UseBasicParsing | iex",
             },
-            "terraform": {
-                "check": "terraform",
-                "winget": ["winget", "install", "--id", "HashiCorp.Terraform", "-e", "--source", "winget"],
-            },
             "docker": {
                 "check": "docker",
                 "winget": ["winget", "install", "--id", "Docker.DockerDesktop", "-e", "--source", "winget"],
@@ -209,6 +230,8 @@ class Subprocess:
 
         @staticmethod
         def ensure(tool: str):
+            if tool == "all":
+                return print("All installed succesfully!")
             tool = tool.lower()
             if tool not in Subprocess.ExternalDependency.INSTALLERS:
                 raise ValueError(f"[Installer] Unknown tool: {tool}")
@@ -240,23 +263,47 @@ class Subprocess:
         def post_install_check(tool: str):
             """
             Verifies whether the installed tool is available in PATH.
-            If not found, tries forced PATH refresh (PowerShell only), or fallback to known path.
-            Raises error if still not detected.
+            - Checks `which()`.
+            - Forces PATH refresh (Windows only).
+            - Checks fallback install locations.
+            - Prompts for IDE restart if running in a virtual environment.
+            - Otherwise, force restarts PyCharm if it's running.
             """
             exe = Subprocess.ExternalDependency.INSTALLERS[tool]["check"]
 
-            # Check PATH first
-            if Subprocess.CMD.which(exe):
-                print(f"[Installer] ✅ {tool} is now available.")
+            def found(msg=""):
+                print(f"[Installer] ✅ {tool} is now available.{msg}")
                 return
 
-            # Force a PATH refresh (PowerShell only, Windows-only)
+            def restart_pycharm_if_running():
+                for proc in psutil.process_iter(["name", "exe"]):
+                    name = proc.info.get("name", "").lower()
+                    if "pycharm" in name:
+                        try:
+                            path = proc.info["exe"]
+                            print(f"[Installer] 🔁 Restarting PyCharm: {path}")
+                            proc.kill()
+                            time.sleep(2)
+                            subprocess.Popen([path])
+                            return
+                        except Exception as e:
+                            print(f"[Installer] ⚠️ Failed to restart PyCharm: {e}")
+                print(f"[Installer] ℹ️ PyCharm not detected — no restart needed.")
+
+            def is_venv():
+                return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+            # Check PATH first
+            if Subprocess.CMD.which(exe):
+                return found()
+
+            # Force a PATH refresh (Windows only)
             if platform.system() == "Windows":
                 try:
                     refresh_path_cmd = [
                         "powershell", "-Command",
-                        "[Environment]::SetEnvironmentVariable('Path', " +
-                        "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + " +
+                        "[Environment]::SetEnvironmentVariable('Path', "
+                        "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + "
                         "[Environment]::GetEnvironmentVariable('Path','User'), 'Process')"
                     ]
                     Subprocess.CMD.run(refresh_path_cmd, shell=True)
@@ -266,18 +313,24 @@ class Subprocess:
 
             # Recheck after refresh
             if Subprocess.CMD.which(exe):
-                print(f"[Installer] ✅ {tool} is now available after forced PATH refresh.")
-                return
+                return found(" (after PATH refresh)")
 
-            # Manual fallback check (e.g. Azure CLI known location)
+            # Fallback path (Azure CLI)
             if tool == "azure":
                 fallback = Path("C:/Program Files (x86)/Microsoft SDKs/Azure/CLI2/wbin/az.cmd")
                 if fallback.exists():
                     print(f"[Installer] ✅ {tool} is installed at fallback location.")
-                    print(f"🧠  Run it manually using: {fallback}")
+                    print(f"🧠  You can manually run it via: {fallback}")
                     return
 
-            # Final fail
+            # Final attempt: IDE warning or restart
+            if is_venv():
+                print(f"[Installer] ⚠️ {tool} may not be visible inside the virtual environment.")
+                print("💡 Please close and reopen your IDE to reload PATH.")
+            else:
+                restart_pycharm_if_running()
+
+            # Still not found
             raise RuntimeError(f"[Installer] ❌ {tool} still not found in PATH after install.")
 
 
@@ -2421,27 +2474,32 @@ class BackendMethods:
             return bm.AzureContext._cached_tenant_id
 
         @staticmethod
+        @staticmethod
         def ensure_az_installed():
             """
-            Ensures Azure CLI is installed. Attempts install via winget if missing.
-            Raises RuntimeError if install fails or az remains unavailable.
+            Ensures Azure CLI is installed via winget (Windows-only).
+            Uses Subprocess.CMD to execute and validate install.
+
+            Raises:
+                RuntimeError: If install fails or az remains unavailable.
             """
             if shutil.which("az"):
                 return
 
-            if platform.system() == "Windows":
-                try:
-                    subprocess.run(
-                        ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"],
-                        check=True
-                    )
-                except Exception as e:
-                    raise RuntimeError(f"[AzureInstaller] winget install failed: {e}")
-            else:
+            if platform.system() != "Windows":
                 raise RuntimeError("[AzureInstaller] Auto-install only supported on Windows")
 
+            try:
+                Subprocess.CMD.run(
+                    ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"],
+                    force_global_shell=True
+                )
+            except subprocess.CalledProcessError as e:
+                msg = e.stderr.strip() if e.stderr else str(e)
+                raise RuntimeError(f"[AzureInstaller] winget install failed:\n{msg}")
+
             if not shutil.which("az"):
-                raise RuntimeError("[AzureInstaller] Azure CLI install failed or not in PATH")
+                raise RuntimeError("[AzureInstaller] Azure CLI install failed or not found in PATH")
 
         @staticmethod
         def azure_login(tenant_id: str):
@@ -2454,22 +2512,29 @@ class BackendMethods:
             Raises:
                 RuntimeError: If Azure CLI is not found or login fails.
             """
-            login_cmd = ["az", "login", "--tenant", tenant_id]
-
             if bm.AzureContext.azure_is_logged_in():
                 print("[AzureContext] Already authenticated. Skipping login.")
                 return
 
+            az_path = shutil.which("az")
+            if not az_path:
+                try:
+                    bm.AzureContext.ensure_az_installed()
+                    az_path = shutil.which("az")
+                    if not az_path:
+                        raise RuntimeError("[AzureContext] Azure CLI (az) still not found after attempted install.")
+                except Exception as install_err:
+                    raise RuntimeError(f"[AzureContext] Failed to ensure az is installed: {install_err}")
+
             try:
-                subprocess.run(login_cmd, check=True)
+                Subprocess.CMD.run(
+                    [az_path, "login", "--tenant", tenant_id],
+                    force_global_shell=True
+                )
                 print("[AzureContext] Login successful.")
-            except FileNotFoundError:
-                try: bm.AzureContext.ensure_az_installed()
-                except:
-                    raise RuntimeError("[AzureContext] Azure CLI (az) not found.")
             except subprocess.CalledProcessError as e:
-                raise RuntimeError(
-                    f"[AzureContext] Azure login failed:\n{e.stderr.strip() if e.stderr else 'unknown error'}")
+                msg = e.stderr.strip() if e.stderr else "unknown error"
+                raise RuntimeError(f"[AzureContext] Azure login failed:\n{msg}")
 
         @staticmethod
         def azure_is_logged_in() -> bool:
@@ -2500,7 +2565,6 @@ class BackendMethods:
             if not project:
                 raise ValueError("[AzureContext] Project name is required for initialization.")
 
-            # Ensure Azure CLI is installed (auto-install on Windows)
             bm.AzureContext.ensure_az_installed()
 
             tenant_id = bm.AzureContext._get_cached_tenant(project)
@@ -2508,14 +2572,20 @@ class BackendMethods:
                 raise RuntimeError("[AzureContext] No cached tenant ID found for project.")
 
             try:
-                subprocess.run(["az", "login", "--tenant", tenant_id], check=True)
+                Subprocess.CMD.run(
+                    ["az", "login", "--tenant", tenant_id],
+                    force_global_shell=True
+                )
                 print("[AzureContext] Login successful.")
             except subprocess.CalledProcessError as e:
-                raise RuntimeError(f"[AzureContext] Azure login failed:\n{e.stderr}")
+                msg = e.stderr.strip() if e.stderr else "unknown error"
+                raise RuntimeError(f"[AzureContext] Azure login failed:\n{msg}")
 
-            # Try to set CLI context (non-fatal if missing)
             try:
-                subprocess.run(["az", "context", "set", "--name", project], check=True)
+                Subprocess.CMD.run(
+                    ["az", "context", "set", "--name", project],
+                    force_global_shell=True
+                )
                 print(f"[AzureContext] Azure context set to '{project}'")
             except subprocess.CalledProcessError:
                 print(f"[AzureContext] No Azure CLI context named '{project}' found (optional).")
@@ -2531,13 +2601,16 @@ class BackendMethods:
             Raises:
                 RuntimeError: If unable to retrieve active context.
             """
-            result = subprocess.run(
-                ["az", "context", "show", "--query", "name", "--output", "tsv"],
-                capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"[AzureContext] Failed to get active context:\n{result.stderr.strip()}")
-            return result.stdout.strip()
+            try:
+                result = Subprocess.CMD.run(
+                    ["az", "context", "show", "--query", "name", "--output", "tsv"],
+                    capture_output=True,
+                    text=True
+                )
+                return result.stdout.strip()
+            except subprocess.CalledProcessError as e:
+                msg = e.stderr.strip() if e.stderr else "unknown error"
+                raise RuntimeError(f"[AzureContext] Failed to get active context:\n{msg}")
 
         @staticmethod
         def list_contexts() -> list[str]:
@@ -2547,13 +2620,16 @@ class BackendMethods:
             Returns:
                 list[str]: List of context names.
             """
-            result = subprocess.run(
-                ["az", "context", "list", "--query", "[].name", "--output", "tsv"],
-                capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"[AzureContext] Failed to list contexts:\n{result.stderr.strip()}")
-            return result.stdout.strip().splitlines()
+            try:
+                result = Subprocess.CMD.run(
+                    ["az", "context", "list", "--query", "[].name", "--output", "tsv"],
+                    capture_output=True,
+                    text=True
+                )
+                return result.stdout.strip().splitlines()
+            except subprocess.CalledProcessError as e:
+                msg = e.stderr.strip() if e.stderr else "unknown error"
+                raise RuntimeError(f"[AzureContext] Failed to list contexts:\n{msg}")
 
     class AzureClientSecret:
         """
