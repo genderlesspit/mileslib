@@ -1,5 +1,6 @@
 import builtins
 import contextvars
+import shlex
 import shutil
 import uuid
 from contextlib import contextmanager
@@ -7,7 +8,25 @@ from contextvars import ContextVar
 from functools import wraps
 from unittest import mock
 from urllib.parse import urlparse
-
+import os
+import subprocess
+from azure.identity import DefaultAzureCredential
+from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.keyvault import KeyVaultManagementClient
+from azure.mgmt.keyvault.models import (
+    VaultCreateOrUpdateParameters,
+    AccessPolicyEntry,
+    Permissions,
+    Sku,
+    SkuName,
+    KeyPermissions,
+    SecretPermissions,
+    CertificatePermissions
+)
+from azure.core.exceptions import ResourceExistsError
+import shutil
+import subprocess
+import platform
 import msal
 import pytest
 import importlib.util
@@ -51,9 +70,216 @@ import time
 import uvicorn
 from functools import wraps
 from typing import Callable
+import ctypes
 
 if TYPE_CHECKING:
     LOG: Any  # let IDEs think it's there
+
+import os
+import sys
+import shlex
+import subprocess
+import platform
+from shutil import which
+
+
+import os
+import sys
+import platform
+import shlex
+import subprocess
+from shutil import which
+
+class Subprocess:
+    class CMD:
+        @staticmethod
+        def run(
+            cmd: str | list,
+            *,
+            shell=False,
+            capture_output=True,
+            check=True,
+            text=True,
+            env=None,
+            force_global_shell=False
+        ):
+            """
+            Runs a subprocess with optional global shell enforcement.
+            On Windows, `force_global_shell=True` runs in cmd.exe for system-level tools like winget.
+            """
+            if isinstance(cmd, str) and not shell:
+                cmd = shlex.split(cmd)
+
+            if force_global_shell and platform.system() == "Windows":
+                cmd = ["cmd.exe", "/c"] + cmd
+                shell = False
+
+            print(f"[CMD] Running: {cmd}")
+            return subprocess.run(
+                cmd,
+                shell=shell,
+                capture_output=capture_output,
+                check=check,
+                text=text,
+                env=env,
+            )
+
+        @staticmethod
+        def system_python() -> str:
+            """Return a path to the system Python executable."""
+            if platform.system() == "Windows":
+                try:
+                    result = subprocess.run(["py", "-0p"], capture_output=True, text=True, check=True)
+                    return result.stdout.strip().splitlines()[0]
+                except Exception as e:
+                    print(f"[CMD] Failed to resolve system Python via `py -0p`: {e}")
+            return "python"  # fallback
+
+        @staticmethod
+        def pip_install(package: str | list, *, upgrade=False, global_scope=False):
+            pkgs = [package] if isinstance(package, str) else package
+            exe = Subprocess.CMD.system_python() if global_scope else sys.executable
+            cmd = [exe, "-m", "pip", "install"]
+            if upgrade:
+                cmd.append("--upgrade")
+            cmd.extend(pkgs)
+            return Subprocess.CMD.run(cmd)
+
+        @staticmethod
+        def pipx_install_global(package: str):
+            """Installs a package globally with pipx using system Python."""
+            python = Subprocess.CMD.system_python()
+
+            pipx_installed = subprocess.run(["pipx", "--version"], capture_output=True).returncode == 0
+            if not pipx_installed:
+                print("[Installer] pipx not found. Installing globally via system Python...")
+                subprocess.run([python, "-m", "pip", "install", "--user", "pipx"], check=True)
+                subprocess.run([python, "-m", "pipx", "ensurepath"], check=True)
+
+            print(f"[Installer] Installing '{package}' globally with pipx...")
+            return subprocess.run(["pipx", "install", package], check=True)
+
+        @staticmethod
+        def winget_install(command: list[str]):
+            """
+            Executes a winget command in a system shell with elevation.
+            """
+            if platform.system() != "Windows":
+                raise RuntimeError("winget is only available on Windows.")
+
+            full_cmd = " ".join(command)
+            elevated = [
+                "powershell", "-Command",
+                f"Start-Process cmd -ArgumentList '/c {full_cmd}' -Verb runAs"
+            ]
+            print(f"[CMD] Elevating and running winget: {full_cmd}")
+            subprocess.run(elevated, check=True)
+
+        @staticmethod
+        def powershell_install(script: str):
+            return Subprocess.CMD.run(["powershell", "-Command", script], shell=True)
+
+        @staticmethod
+        def which(binary: str) -> str | None:
+            return which(binary)
+
+    class ExternalDependency:
+        INSTALLERS = {
+            "azure": {
+                "check": "az",
+                "winget": ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"]
+            },
+            "rust": {
+                "check": "rustc",
+                "powershell": "iwr https://sh.rustup.rs -UseBasicParsing | iex",
+            },
+            "terraform": {
+                "check": "terraform",
+                "winget": ["winget", "install", "--id", "HashiCorp.Terraform", "-e", "--source", "winget"],
+            },
+            "docker": {
+                "check": "docker",
+                "winget": ["winget", "install", "--id", "Docker.DockerDesktop", "-e", "--source", "winget"],
+            },
+        }
+
+        @staticmethod
+        def in_venv() -> bool:
+            return hasattr(sys, "real_prefix") or (hasattr(sys, "base_prefix") and sys.base_prefix != sys.prefix)
+
+        @staticmethod
+        def ensure(tool: str):
+            tool = tool.lower()
+            if tool not in Subprocess.ExternalDependency.INSTALLERS:
+                raise ValueError(f"[Installer] Unknown tool: {tool}")
+
+            exe = Subprocess.ExternalDependency.INSTALLERS[tool]["check"]
+            if Subprocess.CMD.which(exe):
+                print(f"[Installer] ✅ {tool} already installed.")
+                return
+
+            inst = Subprocess.ExternalDependency.INSTALLERS[tool]
+            try:
+                if "pipx" in inst:
+                    Subprocess.CMD.pipx_install_global(inst["pipx"])
+                elif "winget" in inst:
+                    Subprocess.CMD.winget_install(inst["winget"])
+                elif "powershell" in inst:
+                    Subprocess.CMD.powershell_install(inst["powershell"])
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"[Installer] Install failed for {tool}: {e}")
+
+            Subprocess.ExternalDependency.post_install_check(tool)
+
+        @staticmethod
+        def ensure_all():
+            for tool in Subprocess.ExternalDependency.INSTALLERS:
+                Subprocess.ExternalDependency.ensure(tool)
+
+        @staticmethod
+        def post_install_check(tool: str):
+            """
+            Verifies whether the installed tool is available in PATH.
+            If not found, tries forced PATH refresh (PowerShell only), or fallback to known path.
+            Raises error if still not detected.
+            """
+            exe = Subprocess.ExternalDependency.INSTALLERS[tool]["check"]
+
+            # Check PATH first
+            if Subprocess.CMD.which(exe):
+                print(f"[Installer] ✅ {tool} is now available.")
+                return
+
+            # Force a PATH refresh (PowerShell only, Windows-only)
+            if platform.system() == "Windows":
+                try:
+                    refresh_path_cmd = [
+                        "powershell", "-Command",
+                        "[Environment]::SetEnvironmentVariable('Path', " +
+                        "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + " +
+                        "[Environment]::GetEnvironmentVariable('Path','User'), 'Process')"
+                    ]
+                    Subprocess.CMD.run(refresh_path_cmd, shell=True)
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"[Installer] ⚠️ Failed to force PATH refresh: {e}")
+
+            # Recheck after refresh
+            if Subprocess.CMD.which(exe):
+                print(f"[Installer] ✅ {tool} is now available after forced PATH refresh.")
+                return
+
+            # Manual fallback check (e.g. Azure CLI known location)
+            if tool == "azure":
+                fallback = Path("C:/Program Files (x86)/Microsoft SDKs/Azure/CLI2/wbin/az.cmd")
+                if fallback.exists():
+                    print(f"[Installer] ✅ {tool} is installed at fallback location.")
+                    print(f"🧠  Run it manually using: {fallback}")
+                    return
+
+            # Final fail
+            raise RuntimeError(f"[Installer] ❌ {tool} still not found in PATH after install.")
+
 
 class StaticMethods:
     class Dependencies:
@@ -157,33 +383,50 @@ class StaticMethods:
             return decorator
 
         @staticmethod
-        def recall(fn: Callable, fix: Union[Callable, List[Callable]]):
+        def recall(fn: Callable, fix: Union[Callable, List[Callable]]) -> Any:
             """
             Calls a zero-argument function with retry logic and one or more fix strategies.
 
-            This is a wrapper around `attempt()` that enforces callable-based retry behavior.
-            If `fix` is a list, each callable will be tried in order as a fallback.
+            If `fn()` fails, will try one or more `fix()` strategies to recover and reattempt.
 
             Args:
-                fn (Callable[[], Any]): Zero-arg callable to execute (use lambda for args).
-                fix (Callable or list of Callable): One or more fix strategies, all zero-arg callables.
+                fn (Callable[[], Any]): Primary function to run.
+                fix (Callable or list of Callable): Fix strategy or list of fallback functions.
 
             Returns:
-                Any: The result of the successful callable.
+                Any: Result of the successful call to `fn`.
 
             Raises:
-                RuntimeError: If all fallback functions fail or a fix callback errors.
-                TypeError: If a non-callable is passed to `fix`.
+                RuntimeError: If all fix attempts fail.
+                TypeError: If non-callables are passed.
             """
-            # simply forward to attempt
             if not callable(fn):
-                raise TypeError("First argument to recall() must be callable")
+                raise TypeError("[recall] First argument must be callable")
+
+            # Try the main function first
             try:
-                if isinstance(fix, list):
-                    for fn in fix: StaticMethods.ErrorHandling.attempt(fn, fix=fn)
-                elif callable(fix):
-                    return StaticMethods.ErrorHandling.attempt(fn, fix=fix)
-            except TypeError: raise TypeError
+                result = fn()
+                print(f"[recall] Primary function succeeded")
+                return result
+            except Exception as e:
+                print(f"[recall] Primary function failed: {e}")
+
+            # Try fix(es)
+            fixes = fix if isinstance(fix, list) else [fix]
+            for i, fix_fn in enumerate(fixes):
+                if not callable(fix_fn):
+                    raise TypeError(f"[recall] Fix at index {i} is not callable: {fix_fn}")
+                try:
+                    print(f"[recall] Attempting fix #{i + 1}: {fix_fn.__name__}")
+                    fix_fn()
+                    print(f"[recall] Fix #{i + 1} succeeded. Retrying primary function...")
+                    result = fn()
+                    print(f"[recall] Retry succeeded after fix #{i + 1}")
+                    return result
+                except Exception as fix_err:
+                    print(f"[recall] Fix #{i + 1} failed: {fix_err}")
+
+            raise RuntimeError("[recall] All fix strategies failed. Aborting.")
 
         @staticmethod
         def attempt(
@@ -246,31 +489,51 @@ class StaticMethods:
             raise last_exception
 
         @staticmethod
-        def check_input(arg: Any, expected: Union[Type, Tuple[Type, ...]], label: str = "Input") -> Any:
+        def check_types(arg: Any, expected: Union[Type, Tuple[Type, ...], list], label: str = "check_types") -> Any:
             """
-            Verifies that the input matches the expected type(s). Raises TypeError if not.
+            Verifies that the input or each item in a list matches any of the expected type(s).
+            Raises TypeError if any do not match.
 
             Args:
-                arg (Any): The argument to check.
-                expected (Type or tuple of Types): The expected type(s) (e.g., str, dict, int).
-                label (str): Optional label for error clarity (e.g., function or variable name).
+                arg (Any): The argument or list of arguments to check.
+                expected (Type, tuple, or list of types): Acceptable types (e.g., str, int).
+                label (str): Label for clearer error messages.
+
+            Returns:
+                The original arg if valid.
 
             Raises:
-                TypeError: If the argument does not match any of the expected types.
+                TypeError: If any input does not match the expected types.
             """
-            if not isinstance(arg, expected):
-                exp_types = (
-                    expected.__name__
-                    if isinstance(expected, type)
-                    else ", ".join(t.__name__ for t in expected)
-                )
-                raise TypeError(f"{label} must be of type {exp_types}, but got {type(arg).__name__}.")
+
+            # Normalize expected types to tuple
+            if isinstance(expected, list):
+                expected_types = tuple(expected)
+            elif isinstance(expected, type):
+                expected_types = (expected,)
+            elif isinstance(expected, tuple):
+                expected_types = expected
+            else:
+                raise TypeError(f"[{label}] Invalid 'expected' type: {type(expected)}")
+
+            def _validate(x):
+                if not isinstance(x, expected_types):
+                    type_names = ", ".join(t.__name__ for t in expected_types)
+                    raise TypeError(f"[{label}] Expected type(s): {type_names}; got {type(x).__name__}")
+
+            if isinstance(arg, list):
+                for i, item in enumerate(arg):
+                    _validate(item)
+            else:
+                _validate(arg)
+
             return arg
 
     timer = ErrorHandling.timer
     attempt = ErrorHandling.attempt
     recall = ErrorHandling.recall
-    check_input = ErrorHandling.check_input
+    check_input = ErrorHandling.check_types
+    check_types = ErrorHandling.check_types
     ERROR_USAGE = """
         StaticMethods ErrorHandling Aliases
         -----------------------------------
@@ -773,12 +1036,12 @@ ENV_CONTENT = {
     "global_root": str(GLOBAL_ROOT),
     "global_cfg_file": str(GLOBAL_CFG_FILE),
     "global_log_folder": str(GLOBAL_LOG_DIR),
-    "selected_project": ""
 }
 
 # ─── Default Global Config Values ───────────────────────────────
 GLOBAL_CFG_DEFAULT = {
-    "selected_project": None,
+    "selected_project_name": None,
+    "selected_project_path": None,
     "template_directory": str(GLOBAL_TEMPLATES_DIR)
 }
 
@@ -872,31 +1135,6 @@ class MilesContext:
             MilesContext.EnvLoader._cache = env_dict
             MilesContext.EnvLoader._env_path = path
             return env_dict
-
-        @staticmethod
-        def select_project():
-            sel_proj = MilesContext.EnvLoader.get(key="selected_project")
-
-            def get_sel_proj_name():
-                if sel_proj is None:
-                    raise ValueError
-                if sel_proj is not str:
-                    raise TypeError
-                return sel_proj
-
-            def load_from_config():
-                raise NotImplementedError
-
-            def user_input():
-                user = input("Please input the name of your selected project: ")
-                if not isinstance(user, str): return sm.attempt(lambda: user_input())
-
-            fix_fns = [load_from_config(), user_input()]
-
-            sm.recall = (
-                lambda: get_sel_proj_name(),
-                fix_fns
-            )
 
         @staticmethod
         def write(
@@ -1121,18 +1359,11 @@ class MilesContext:
         def dump(path: Path = GLOBAL_CFG_FILE) -> dict:
             """
             Prints the current config file as formatted JSON for inspection.
-
-            Useful for CLI diagnostics or debugging.
-
-            Args:
-                path (Path): Project directory.
-                file_name (str): Specific config file to print (default: auto-detect).
             """
-            file = path
-            if not sm.check_input(path, expected=Path): raise FileNotFoundError
+            if not sm.check_types(path, expected=Path):
+                raise FileNotFoundError
 
-            file_ext = file.suffix.lower().lstrip(".")
-            valid_ext = ["toml", "json", "yaml", "yml"]
+            file_ext = StaticMethods.FileIO.resolve_extension(path)
 
             def parse_toml(path: Path) -> dict:
                 return toml.load(path)
@@ -1150,32 +1381,15 @@ class MilesContext:
                 "yml": parse_yaml,
             }
 
-            def check_ext(ext: str) -> str:
-                if ext not in valid_ext:
-                    raise TypeError
-                return ext
-
-            def get_parser(ext: str) -> dict:
-                try:
-                    ext = check_ext(ext)
-                    if ext not in parsers: raise TypeError
-                    parser = parsers[ext]
-                    return parser(file)
-                except Exception:
-                    raise RuntimeError
-
-            parsed_data = get_parser(file_ext)
-
-            if not isinstance(parsed_data, dict): raise TypeError
-            return parsed_data
-
-        @staticmethod
-        def load(path: Path = GLOBAL_CFG_FILE) -> dict:
-            loaded_cfg = sm.recall(
-                lambda: MilesContext.Config.dump(path),  # <- primary attempt
-                lambda: MilesContext.Config.build(path)  # <- fallback / fix
-            )
-            return loaded_cfg
+            try:
+                if file_ext not in parsers:
+                    raise TypeError(f"[Config.dump] Unsupported config format: {file_ext}")
+                parsed_data = parsers[file_ext](path)
+                if not isinstance(parsed_data, dict):
+                    raise TypeError(f"[Config.dump] Parsed config is not a dict: {type(parsed_data)}")
+                return parsed_data
+            except Exception as e:
+                raise RuntimeError(f"[Config.dump] Failed to parse config at {path}: {e}")
 
         @staticmethod
         def fetch(path: Path = GLOBAL_CFG_FILE) -> dict:
@@ -1188,9 +1402,15 @@ class MilesContext:
             Returns:
                 dict: Parsed configuration data.
             """
-            MilesContext.Config.load(path=path)
-            data = MilesContext.Config.dump(path=path)
-            return data
+            def fallback():
+                MilesContext.Config.build(path)
+                return MilesContext.Config.dump(path)  # reload as dict
+
+            loaded_cfg = sm.recall(
+                lambda: MilesContext.Config.dump(path),
+                lambda: fallback
+            )
+            return loaded_cfg
 
         @staticmethod
         def get(*keys, path: Path = GLOBAL_CFG_FILE) -> Any:
@@ -1210,6 +1430,7 @@ class MilesContext:
                 RuntimeError: If keys are missing or config is malformed.
             """
             data = MilesContext.Config.fetch(path)
+            print(f"[Config.get] Config successfully loaded: {data}")
 
             try:
                 for key in keys:
@@ -1217,6 +1438,14 @@ class MilesContext:
                 return data
             except (KeyError, TypeError) as e:
                 raise RuntimeError(f"[Config.get] Key path {keys} not found or invalid: {e}")
+
+        @staticmethod
+        def deep_merge(target: dict, updates: dict):
+            for k, v in updates.items():
+                if isinstance(v, dict) and isinstance(target.get(k), dict):
+                    MilesContext.Config.deep_merge(target[k], v)
+                else:
+                    target[k] = v
 
         @staticmethod
         def write(path: Path = GLOBAL_CFG_FILE, *, set: dict = None, add: dict = None, remove: list = None) -> None:
@@ -1232,12 +1461,14 @@ class MilesContext:
             Raises:
                 RuntimeError: If the config file cannot be read or written.
             """
-            # Ensure the file exists and is readable
             data = MilesContext.Config.fetch(path)
 
             if set:
                 for k, v in set.items():
-                    data[k] = v
+                    if isinstance(v, dict) and isinstance(data.get(k), dict):
+                        MilesContext.Config.deep_merge(data[k], v)
+                    else:
+                        data[k] = v
 
             if add:
                 for k, v in add.items():
@@ -1442,7 +1673,7 @@ class MilesContext:
     class AsyncCallbacks:
         """
         Temporary FastAPI-based async callback server for OAuth or webhook-like flows.
-        Can be used as a decorator to pause function execution until a callback is received.
+        Use @milescallback("/callback") to block function execution until a GET request is received.
         """
 
         _app = FastAPI()
@@ -1450,56 +1681,111 @@ class MilesContext:
         _result = None
         _triggered = False
         _server_thread = None
+        _callback_path = None
+        _port = 8000
+
+        @staticmethod
+        def _reset():
+            MilesContext.AsyncCallbacks._result = None
+            MilesContext.AsyncCallbacks._triggered = False
+            MilesContext.AsyncCallbacks._server_thread = None
+            MilesContext.AsyncCallbacks._callback_path = None
+
+        @staticmethod
+        def _validate_path(path: str) -> str:
+            if not path.startswith("/"):
+                raise ValueError(f"[AsyncCallbacks] Invalid path '{path}': must start with '/'")
+            return path
+
+        @staticmethod
+        def _start_server(log):
+            try:
+                log.debug(f"[AsyncCallbacks] Starting FastAPI server on 127.0.0.1:{MilesContext.AsyncCallbacks._port}")
+                uvicorn.run(MilesContext.AsyncCallbacks._app, host="127.0.0.1", port=MilesContext.AsyncCallbacks._port, log_level="error")
+            except Exception as e:
+                log.exception(f"[AsyncCallbacks] Failed to start server: {e}")
 
         @staticmethod
         def async_callback(path: str = "/callback", timeout: float = 60):
             """
-            Decorator to enable temporary FastAPI callback for async flows (e.g. OAuth).
-            Blocks execution until a GET request hits the specified path.
+            Decorator that blocks the function until a GET request is received at `path`.
+            Automatically spins up a temporary FastAPI server at http://localhost:8000.
 
             Args:
-                path (str): Endpoint path to register for callback (default /callback)
-                timeout (float): Max seconds to wait for the callback before proceeding
+                path (str): Path to listen for the callback (e.g. "/callback").
+                timeout (float): Seconds to wait before timing out.
 
             Returns:
-                Callable: Decorator that pauses function execution until callback received
+                Decorator that passes callback query parameters to the wrapped function.
             """
 
-            def decorator(fn: Callable[[dict], None]):
+            def decorator(fn: Callable[[dict], Any]):
                 @wraps(fn)
                 def wrapper(*args, **kwargs):
+                    log = MilesContext.Logger.get_loguru()
+                    validated_path = MilesContext.AsyncCallbacks._validate_path(path)
+
                     with MilesContext.AsyncCallbacks._lock:
-                        if not MilesContext.AsyncCallbacks._server_thread:
-                            @MilesContext.AsyncCallbacks._app.get(path)
-                            async def callback(req: Request):
+                        if MilesContext.AsyncCallbacks._triggered:
+                            log.warning("[AsyncCallbacks] Already triggered; reset required")
+                            MilesContext.AsyncCallbacks._reset()
+
+                        if MilesContext.AsyncCallbacks._server_thread is None:
+                            log.debug(f"[AsyncCallbacks] Registering GET route at {validated_path}")
+
+                            @MilesContext.AsyncCallbacks._app.get(validated_path)
+                            async def _callback(req: Request):
                                 MilesContext.AsyncCallbacks._result = dict(req.query_params)
                                 MilesContext.AsyncCallbacks._triggered = True
+                                log.info(f"[AsyncCallbacks] Callback received: {MilesContext.AsyncCallbacks._result}")
                                 return JSONResponse({"status": "received"})
 
+                            MilesContext.AsyncCallbacks._callback_path = validated_path
                             MilesContext.AsyncCallbacks._server_thread = threading.Thread(
-                                target=lambda: uvicorn.run(
-                                    MilesContext.AsyncCallbacks._app,
-                                    host="127.0.0.1",
-                                    port=8000,
-                                    log_level="error"
-                                ),
+                                target=MilesContext.AsyncCallbacks._start_server,
+                                args=(log,),
                                 daemon=True
                             )
                             MilesContext.AsyncCallbacks._server_thread.start()
-                            print(f"[AsyncCallbacks] Waiting for callback on {path}...")
 
+                    log.info(f"[AsyncCallbacks] Waiting for callback on {validated_path}... (timeout={timeout}s)")
                     start = time.time()
+
                     while not MilesContext.AsyncCallbacks._triggered and (time.time() - start < timeout):
                         time.sleep(0.5)
 
                     if not MilesContext.AsyncCallbacks._triggered:
-                        print(f"[AsyncCallbacks] Timeout waiting for callback at {path}")
+                        log.warning(f"[AsyncCallbacks] Timeout waiting for callback at {validated_path}")
 
-                    return fn(MilesContext.AsyncCallbacks._result or {}, *args, **kwargs)
+                    result = MilesContext.AsyncCallbacks._result or {}
+                    try:
+                        return fn(result, *args, **kwargs)
+                    finally:
+                        MilesContext.AsyncCallbacks._reset()
+                        log.debug("[AsyncCallbacks] Callback state reset")
 
                 return wrapper
 
             return decorator
+
+    @staticmethod
+    def milescallback(path: str = "/callback", timeout: float = 60):
+        """
+        Shorthand for @MilesContext.AsyncCallbacks.async_callback.
+
+        Example usage:
+            @milescallback("/callback")
+            def receive_callback(data):
+                print("Received data:", data)
+
+        Args:
+            path (str): Path to listen on (must start with "/").
+            timeout (float): How many seconds to wait before timeout.
+
+        Returns:
+            Decorator that blocks until the callback is received.
+        """
+        return MilesContext.AsyncCallbacks.async_callback(path=path, timeout=timeout)
 
     class Decorator:
         """
@@ -1639,14 +1925,32 @@ class MilesContext:
 
         @staticmethod
         def _inject_globals(fn, log):
+            """
+            Injects logger, shared resources, and all uppercase env vars into fn.__globals__.
+
+            Overwrites existing globals for dynamic reconfiguration.
+
+            Only injects if:
+            - The key is a valid Python identifier (k.isidentifier())
+            - The key is ALL UPPERCASE
+            """
             try:
-                fn.__globals__["log"] = log  # type: ignore
-                fn.__globals__["requests_session"] = BackendMethods.Requests.session  # type: ignore
-                for k, v in MilesContext.EnvLoader.load_env().items():
-                    if k.isidentifier() and k.isupper():
-                        fn.__globals__[k] = v  # type: ignore
+                injectables = {
+                    "log": log,
+                    "requests_session": BackendMethods.Requests.session,
+                    **{
+                        k: v
+                        for k, v in MilesContext.EnvLoader.load_env().items()
+                        if k.isidentifier() and k.isupper()
+                    }
+                }
+
+                for k, v in injectables.items():
+                    old = fn.__globals__.get(k, "<unset>")
+                    fn.__globals__[k] = v
+                    log.debug(f"[{fn.__qualname__}] Overwrote global {k}: {old} -> {v}")
             except AttributeError:
-                log.warning("Function has no __globals__; skipping global injection")
+                log.warning(f"[{fn.__qualname__}] No __globals__ found; skipping global injection")
 
         @staticmethod
         def _build_core(fn, args: tuple, kwargs: dict, timed: bool, logged: bool, callback: Optional[str],
@@ -1729,13 +2033,8 @@ class MilesContext:
 
 mc = MilesContext
 mileslib = mc.shim
+milescallback = mc.milescallback
 ROOT = Path(mc.env.get("global_root"))
-
-DEFAULT_PROJECT_NAME = "default_project"
-CURRENT_PROJECT_NAME = mc.cfg_get("selected_project")
-SEL_PROJECT_NAME = CURRENT_PROJECT_NAME or DEFAULT_PROJECT_NAME
-# SEL_PROJECT_PATH = sm.cfg_get
-AZURE_CRED = DefaultAzureCredential()
 
 class BackendMethods:
     import threading, time, uvicorn
@@ -1751,7 +2050,6 @@ class BackendMethods:
         All methods use the shared `requests.Session` and `@mileslib` for logging, retries, timing, and safe mode.
         """
 
-        # Shared session for connection pooling and cookie reuse
         session = requests.Session()
 
         @staticmethod
@@ -1762,8 +2060,9 @@ class BackendMethods:
                 data=None,
                 json=None,
                 headers=None,
-                timeout: float = 5.0
-        ) -> requests.Response:
+                timeout: float = 5.0,
+                expect_json: bool = False
+        ) -> requests.Response | dict | str | None:
             """
             Core request logic used by all HTTP wrappers.
 
@@ -1773,74 +2072,144 @@ class BackendMethods:
                 data/json (dict): Optional request payload.
                 headers (dict): Optional headers.
                 timeout (float): Request timeout in seconds.
+                expect_json (bool): If True, return parsed JSON or raise.
 
             Returns:
-                Response object, or raises HTTPError.
+                Response object or JSON dict or None
             """
             sm.try_import("requests")
-            sm.check_input(method, str, "method")
-            sm.check_input(url, str, "url")
+            sm.check_types(method, str, "method")
+            sm.check_types(url, str, "url")
 
             method = method.lower()
             req = getattr(BackendMethods.Requests.session, method)
             resp = req(url, data=data, json=json, headers=headers, timeout=timeout)
             resp.raise_for_status()
+
+            if expect_json:
+                return resp.json()
+
             return resp
 
         @staticmethod
-        @mileslib(retry=True, timed=True, logged=True)
-        def http_get(url: str, retries: int = 3, timeout: float = 5.0) -> requests.Response:
+        @mileslib(logged=False, safe=True)
+        def http_get(
+                url: str,
+                headers: dict = None,
+                retries: int = 3,
+                timeout: float = 5.0,
+                expect_json: bool = False
+        ) -> requests.Response | dict | None:
             """
-            HTTP GET with retries and decorator integration.
+            HTTP GET with retries and optional JSON parsing.
 
             Args:
                 url (str): URL to GET.
+                headers (dict): Optional headers.
                 retries (int): Retry attempts.
                 timeout (float): Timeout in seconds.
+                expect_json (bool): If True, return response.json().
 
             Returns:
-                Response object.
+                Response or parsed JSON or None.
             """
-            return sm.attempt(lambda: BackendMethods.Requests._do_request("get", url, timeout=timeout), retries=retries)
+            return sm.attempt(
+                lambda: BackendMethods.Requests._do_request(
+                    "get",
+                    url,
+                    headers=headers,
+                    timeout=timeout,
+                    expect_json=expect_json,
+                ),
+                retries=retries
+            )
 
         @staticmethod
-        @mileslib(retry=True, timed=True, logged=True)
-        def http_post(url: str, data: dict, retries: int = 3, timeout: float = 5.0) -> requests.Response:
+        @mileslib(logged=False, safe=True)
+        def http_post(
+                url: str,
+                data: dict,
+                headers: dict = None,
+                retries: int = 3,
+                timeout: float = 5.0,
+                expect_json: bool = False
+        ) -> requests.Response | dict | None:
             """
             HTTP POST with retries and JSON payload.
 
             Args:
                 url (str): URL to POST to.
                 data (dict): JSON payload.
+                headers (dict): Optional headers.
                 retries (int): Retry attempts.
                 timeout (float): Timeout in seconds.
+                expect_json (bool): If True, return response.json().
 
             Returns:
-                Response object.
+                Response or parsed JSON or None.
             """
-            sm.check_input(data, dict, "data")
-            return sm.attempt(lambda: BackendMethods.Requests._do_request("post", url, json=data, timeout=timeout), retries=retries)
+            sm.check_types(data, dict, "data")
+            return sm.attempt(
+                lambda: BackendMethods.Requests._do_request(
+                    "post",
+                    url,
+                    json=data,
+                    headers=headers,
+                    timeout=timeout,
+                    expect_json=expect_json,
+                ),
+                retries=retries
+            )
 
         @staticmethod
-        @mileslib(retry=True, timed=True, logged=True, safe=True)
-        def ensure_endpoint(url: str, timeout: float = 3.0) -> bool:
+        @mileslib(logged=False, safe=True)
+        def ensure_endpoint(
+                url: str,
+                timeout: float = 3.0,
+                expect_json: bool = False,
+                expect_keys: list[str] = None,
+                status_ok: range = range(200, 400),
+        ) -> bool:
             """
-            Check if an HTTP endpoint is up and responds 2xx or 3xx.
+            Check if an HTTP endpoint is up and optionally validate its response content.
 
             Args:
                 url (str): URL to check.
                 timeout (float): Timeout in seconds.
+                expect_json (bool): If True, requires response to be JSON-decodable.
+                expect_keys (list[str], optional): List of keys that must exist in JSON payload.
+                status_ok (range): Acceptable status code range.
 
             Returns:
-                True if reachable, False otherwise.
+                bool: True if endpoint is reachable and meets criteria, False otherwise.
             """
             try:
                 resp = BackendMethods.Requests._do_request("get", url, timeout=timeout)
-                return 200 <= resp.status_code < 400
+
+                if hasattr(resp, "status_code") and resp.status_code not in status_ok:
+                    print(f"[ensure_endpoint] Status code {resp.status_code} not in {list(status_ok)}")
+                    return False
+
+                if expect_json:
+                    try:
+                        payload = resp.json() if hasattr(resp, "json") else resp
+                    except Exception:
+                        print(f"[ensure_endpoint] Response is not valid JSON from {url}")
+                        return False
+
+                    if expect_keys:
+                        missing = [k for k in expect_keys if k not in payload]
+                        if missing:
+                            print(f"[ensure_endpoint] Missing expected keys {missing} in response from {url}")
+                            return False
+
+                return True
+
             except Exception as e:
-                print(f"[ensure_endpoint] Request failed: {e}")
+                print(f"[ensure_endpoint] Request to {url} failed: {e}")
                 return False
 
+    reqs = Requests
     http_get = Requests.http_get
     http_post = Requests.http_post
     REQUESTS_USAGE = """
@@ -1854,245 +2223,12 @@ class BackendMethods:
         Perform a POST request with JSON payload, retry support, and logging.
     """
 
-    class Secrets:
-        """
-        Secure secrets manager for retrieving and caching credentials.
-        Primary source: Azure Key Vault.
-        Fallback: OS environment variables.
-
-        Does not persist secrets to disk under any circumstances.
-        """
-
-        _cache = {}
-        _client = None
-
-        @staticmethod
-        @mileslib
-        def load_vault(sel_project=SEL_PROJECT_NAME) -> SecretClient | None:
-            """
-            Initializes the Azure Key Vault client if KEY_VAULT_URL is configured.
-            Returns:
-                A SecretClient instance or None if KEY_VAULT_URL is not set or fails.
-            """
-            url = mc.env.get(f"{sel_project}.KEY_VAULT_URL")
-            cur_client = BackendMethods.Secrets._client
-            if not url: raise ValueError("Vault URL not set!")
-
-            def cache_client(client):
-                BackendMethods.Secrets._client = client
-
-            def load_client():
-                if cur_client: return cur_client
-                try:
-                    return SecretClient(vault_url=url, credential=AZURE_CRED)
-                except Exception:
-                    raise RuntimeError
-
-            client = load_client()
-            if not cur_client: cache_client(client)
-            return client
-
-        @staticmethod
-        @mileslib
-        def set(name: str, value: str, sel_project: str = SEL_PROJECT_NAME) -> None:
-            """
-            Sets a secret in the in-memory cache. This does not persist to disk or Azure Vault.
-
-            Args:
-                name: The name of the secret (e.g. "aad-app-id").
-                value: The secret value to store.
-                sel_project: Project namespace to scope the secret.
-
-            Raises:
-                TypeError: If name or value are not strings.
-            """
-            if not isinstance(name, str):
-                raise TypeError("Secret name must be a string.")
-            if not isinstance(value, str):
-                raise TypeError("Secret value must be a string.")
-
-            secret_name = f"{sel_project}.{name}"
-            BackendMethods.Secrets._cache[secret_name] = value
-
-        @staticmethod
-        @mileslib
-        def has(name: str, sel_project: str = SEL_PROJECT_NAME) -> bool:
-            """
-            Returns True if the secret exists in cache, Azure Key Vault, or environment.
-
-            Args:
-                name: The name of the secret (e.g. "aad-app-id").
-                sel_project: Project namespace.
-
-            Returns:
-                bool: True if the secret was found, False otherwise.
-            """
-            try:
-                return BackendMethods.Secrets.get(name=name, sel_project=sel_project, required=False) is not None
-            except Exception:
-                return False
-
-        @staticmethod
-        @mileslib
-        def get(name: str, sel_project: str = SEL_PROJECT_NAME, required: bool = True,
-                store: bool = True) -> str | None:
-            """
-            Retrieves a secret by name.
-
-            Order of resolution:
-                1. In-memory cache
-                2. Azure Key Vault (if configured)
-                3. OS environment variables
-
-            Args:
-                name: The name of the secret (e.g. "aad-app-id").
-                required: If True, raise if secret not found.
-
-            Returns:
-                The secret value, or None if not required and not found.
-
-            Raises:
-                RuntimeError: If the secret is required but not found.
-                None: If the secret is not required.
-            """
-            secret_name = f"{sel_project}.{name}"
-            cache = BackendMethods.Secrets._cache
-            k = secret_name
-            v = None
-
-            def return_secret(k, v):
-                if store and k not in cache:
-                    cache[k] = v
-                return v
-
-            def get_secret_from_cache(k):
-                if k in cache:
-                    v = cache[k]
-                    return return_secret(k, v)
-                raise LookupError
-
-            def get_secret_from_azure(k):
-                client = BackendMethods.Secrets.load_vault(sel_project)
-                try:
-                    v = client.get_secret(k).value
-                    if v: return return_secret(k, v)
-                    raise LookupError
-                except Exception:
-                    raise LookupError
-
-            def get_secret_from_env(k):
-                v = mc.env.get("k")
-                if v: return return_secret(k, v)
-                raise LookupError
-
-            methods = [get_secret_from_cache, get_secret_from_azure, get_secret_from_env]
-
-            for method in methods:
-                try:
-                    return method(k)
-                except (LookupError, Exception):
-                    continue
-
-            # 5. If still not found and required=True, raise RuntimeError
-            if required:
-                raise RuntimeError(f"Could not find {secret_name}! Crashing program, lol.")
-            else:
-                return None
-
-        @staticmethod
-        @mileslib
-        def make_list(sel_project: str = SEL_PROJECT_NAME) -> dict[str, str]:
-            """
-            Returns a dict of {secret_name: value} for all secrets cached under a project.
-
-            Args:
-                sel_project: Project namespace to filter by.
-
-            Returns:
-                Dict of secrets with short keys (without project prefix).
-            """
-            prefix = f"{sel_project}."
-            return {
-                key[len(prefix):]: value
-                for key, value in BackendMethods.Secrets._cache.items()
-                if key.startswith(prefix)
-            }
-
-        @staticmethod
-        @mileslib
-        def get_list(sel_project: str = SEL_PROJECT_NAME) -> list[str]:
-            """
-            Retrieves a list of fully-qualified secret keys from Azure Key Vault that
-            start with the given project prefix and are resolvable via Secrets.get().
-
-            Args:
-                sel_project: The project prefix (e.g., "proj")
-
-            Returns:
-                List of "proj.secret" strings that exist in Azure Key Vault.
-            """
-            keys = []
-            prefix = f"{sel_project}."
-            client = BackendMethods.Secrets.load_vault(sel_project)
-            if not client:
-                raise RuntimeError("Vault client could not be initialized.")
-
-            def find_secrets(prefix):
-                for prop in client.list_properties_of_secrets():
-                    if prop.name.startswith(prefix):
-                        try:
-                            val = BackendMethods.Secrets.get(name=prop.name[len(prefix):], sel_project=sel_project,
-                                                             required=False)
-                            if val is not None:
-                                keys.append(prop.name)
-                        except Exception:
-                            continue
-
-            try:
-                find_secrets(prefix)
-            except Exception as e:
-                raise RuntimeError(f"Failed to fetch secret list: {e}")
-            return keys
-
-        @staticmethod
-        @mileslib
-        def preload_cache(secrets: list, sel_project: str = SEL_PROJECT_NAME) -> None:
-            """
-            Bulk loads a dictionary of secrets into the in-memory cache.
-            Does not persist to disk or Azure Key Vault.
-
-            Args:
-                secrets: Dict of {name: value} pairs.
-                sel_project: Project namespace for all secrets.
-
-            Raises:
-                TypeError: If secrets is not a dictionary or keys/values are not strings.
-            """
-            if not isinstance(secrets, dict):
-                raise TypeError("preload() expects a dictionary of secrets.")
-
-            for k, v in secrets.items():
-                if not isinstance(k, str) or not isinstance(v, str):
-                    raise TypeError(f"Secret keys and values must be strings. Got: {k}={v}")
-                full_key = f"{sel_project}.{k}"
-                BackendMethods.Secrets._cache[full_key] = v
-
-        @staticmethod
-        @mileslib
-        def clear_cache() -> None:
-            """
-            Clears the in-memory secrets cache and Azure client reference.
-            Useful for testing, forced refresh, or resetting between project scopes.
-            """
-            BackendMethods.Secrets._cache.clear()
-            BackendMethods.Secrets._client = None
 
     class TemplateManager:
         _env = None
         _template_dir = GLOBAL_TEMPLATES_DIR or mc.cfg_get("template_directory")
 
         @staticmethod
-        @mileslib
         def setup(path: Path = _template_dir):
             """
             Initialize the Jinja2 environment and template path.
@@ -2115,7 +2251,6 @@ class BackendMethods:
             else: raise RuntimeError("Could not initialize j2 template manager!")
 
         @staticmethod
-        @mileslib
         def render_to_file(template_name: str, context: dict, output_path: Path, overwrite: bool = False):
             """
             Render a Jinja2 template to a file.
@@ -2137,6 +2272,726 @@ class BackendMethods:
             rendered = template.render(**context)
             output_path.write_text(rendered, encoding="utf-8")
             print(f"[template] Wrote: {output_path}")
+
+    class ProjectUtils:
+        """
+        Utilities for managing and validating selected MilesLib project context.
+        """
+
+        @staticmethod
+        def select_project(name: str, path: Path) -> Path:
+            """
+            Sets the selected MilesLib project by name or path into the global environment config.
+
+            Args:
+                name (str): The project name (directory name).
+                path (Path): The full path to the project directory.
+
+            Returns:
+                Path: The resolved project path.
+
+            Raises:
+                TypeError: If name or path are not strings after normalization.
+            """
+            ensured_path = sm.validate_directory(path).resolve()
+            str_path = str(ensured_path)
+            args = [name, str_path]
+            sm.check_types(args, str)  # Defensive: ensure all inputs are strings
+
+            mc.env.write("selected_project_name", str_path, replace_existing=True)
+            mc.env.write("selected_project_path", str_path, replace_existing=True)
+            print(f"[select_project] Active project path set: {str_path}")
+            return ensured_path
+
+        @staticmethod
+        def discover_projects(root: Path = ROOT) -> list[tuple[str, Path]]:
+            """
+            Scans root for valid MilesLib projects with config files.
+
+            Returns:
+                List of tuples: (project_name, project_path)
+            """
+            found = []
+            for sub in root.iterdir():
+                if not sub.is_dir() or sub.name.startswith("__") or "pycache" in sub.name.lower():
+                    continue
+                cfg = sub / f"mileslib_{sub.name}_settings.toml"
+                if cfg.exists():
+                    found.append((sub.name, sub.resolve()))
+            return found
+
+    class AzureTenant:
+        """
+        Manages Azure Tenant ID initialization, validation, and retrieval.
+
+        Uses project-scoped keys: <project>.AZURE_TENANT_ID
+        """
+
+        @staticmethod
+        def init(project: str) -> str:
+            """
+            Prompts the user for a valid Azure Tenant ID, validates, and stores it.
+
+            Args:
+                project (str, optional): Project name for scoping. Defaults to selected project.
+
+            Returns:
+                str: Validated and stored tenant ID.
+            """
+            key = f"{project}.AZURE_TENANT_ID"
+
+            print(f"[AzureTenant] No tenant ID found for project: {project}")
+            bm.AzureTenant.help()
+
+            time.sleep(1)
+            tenant_id = input("Enter your Azure Tenant ID: ").strip()
+            bm.AzureTenant.validate(tenant_id)
+
+            mc.env.write(key, tenant_id, replace_existing=True)
+            print(f"[AzureTenant] Tenant ID set for project '{project}'")
+            return tenant_id
+
+        @staticmethod
+        def get(project: str) -> str:
+            """
+            Retrieves the tenant ID for a project, prompting if missing.
+
+            Args:
+                project (str, optional): Project scope for env key. Defaults to selected project.
+
+            Returns:
+                str: Validated tenant ID.
+            """
+            key = f"{project}.AZURE_TENANT_ID"
+
+            tenant_id = mc.env.get(key, required=False)
+            if not tenant_id:
+                return bm.AzureTenant.init(project)
+
+            bm.AzureTenant.validate(tenant_id)
+            return tenant_id
+
+        @staticmethod
+        def validate(tenant_id: str) -> bool:
+            """
+            Validates the given tenant ID by checking OpenID metadata.
+
+            Args:
+                tenant_id (str): The Azure AD tenant ID to validate.
+
+            Returns:
+                bool: True if valid, otherwise raises an error.
+            """
+            url = f"https://login.microsoftonline.com/{tenant_id}/v2.0/.well-known/openid-configuration"
+            resp = bm.Requests.http_get(url, expect_json=True)
+            if not isinstance(resp, dict) or tenant_id not in resp.get("issuer", ""):
+                raise RuntimeError(f"[AzureTenant] Invalid tenant_id: {tenant_id}")
+            return True
+
+        @staticmethod
+        def help():
+            """
+            Prints human instructions for locating your Azure Tenant ID.
+
+            Excludes CLI methods that require a tenant ID.
+            """
+            print("[🔧 How to Find Your Azure Tenant ID]")
+            print("─────────────────────────────────────")
+            print("📍 Azure Portal (recommended):")
+            print("  1. Go to: https://portal.azure.com/")
+            print("  2. Select 'Azure Active Directory' from the sidebar.")
+            print("  3. Your Tenant ID is listed on the Overview page.")
+            print("🧠 Tip: It looks like a UUID (e.g. 72f988bf-86f1-41af-91ab-2d7cd011db47).")
+            print("─────────────────────────────────────")
+
+    class AzureContext:
+        """
+        Handles Azure CLI login context switching per project using `az context`.
+
+        Each project should define its Azure CLI context name (stored in env/config).
+        """
+
+        _cached_tenant_id = None
+
+        @staticmethod
+        def _get_cached_tenant(project: str):
+            if bm.AzureContext._cached_tenant_id is None:
+                tenant_id = bm.AzureTenant.get(project)
+                bm.AzureContext._cached_tenant_id = tenant_id
+            return bm.AzureContext._cached_tenant_id
+
+        @staticmethod
+        def ensure_az_installed():
+            """
+            Ensures Azure CLI is installed. Attempts install via winget if missing.
+            Raises RuntimeError if install fails or az remains unavailable.
+            """
+            if shutil.which("az"):
+                return
+
+            if platform.system() == "Windows":
+                try:
+                    subprocess.run(
+                        ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"],
+                        check=True
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"[AzureInstaller] winget install failed: {e}")
+            else:
+                raise RuntimeError("[AzureInstaller] Auto-install only supported on Windows")
+
+            if not shutil.which("az"):
+                raise RuntimeError("[AzureInstaller] Azure CLI install failed or not in PATH")
+
+        @staticmethod
+        def azure_login(tenant_id: str):
+            """
+            Performs an interactive Azure CLI login for the given tenant.
+
+            Args:
+                tenant_id (str): The Azure Active Directory tenant ID.
+
+            Raises:
+                RuntimeError: If Azure CLI is not found or login fails.
+            """
+            login_cmd = ["az", "login", "--tenant", tenant_id]
+
+            if bm.AzureContext.azure_is_logged_in():
+                print("[AzureContext] Already authenticated. Skipping login.")
+                return
+
+            try:
+                subprocess.run(login_cmd, check=True)
+                print("[AzureContext] Login successful.")
+            except FileNotFoundError:
+                try: bm.AzureContext.ensure_az_installed()
+                except:
+                    raise RuntimeError("[AzureContext] Azure CLI (az) not found.")
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"[AzureContext] Azure login failed:\n{e.stderr.strip() if e.stderr else 'unknown error'}")
+
+        @staticmethod
+        def azure_is_logged_in() -> bool:
+            """
+            Checks if the Azure CLI is already authenticated.
+
+            Returns:
+                bool: True if logged in, False otherwise.
+            """
+            result = subprocess.run(
+                ["az", "account", "show"],
+                capture_output=True,
+                text=True
+            )
+            return result.returncode == 0
+
+        @staticmethod
+        def init_azure_context(project: str):
+            """
+            Ensures Azure CLI is installed, performs interactive login via CLI, and sets context.
+
+            Args:
+                project (str): Project name for environment-scoped login and context setting.
+
+            Raises:
+                RuntimeError: If Azure CLI is not installed or login fails.
+            """
+            if not project:
+                raise ValueError("[AzureContext] Project name is required for initialization.")
+
+            # Ensure Azure CLI is installed (auto-install on Windows)
+            bm.AzureContext.ensure_az_installed()
+
+            tenant_id = bm.AzureContext._get_cached_tenant(project)
+            if not tenant_id:
+                raise RuntimeError("[AzureContext] No cached tenant ID found for project.")
+
+            try:
+                subprocess.run(["az", "login", "--tenant", tenant_id], check=True)
+                print("[AzureContext] Login successful.")
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"[AzureContext] Azure login failed:\n{e.stderr}")
+
+            # Try to set CLI context (non-fatal if missing)
+            try:
+                subprocess.run(["az", "context", "set", "--name", project], check=True)
+                print(f"[AzureContext] Azure context set to '{project}'")
+            except subprocess.CalledProcessError:
+                print(f"[AzureContext] No Azure CLI context named '{project}' found (optional).")
+
+        @staticmethod
+        def get_active_context() -> str:
+            """
+            Returns the name of the currently active Azure CLI context.
+
+            Returns:
+                str: Active context name.
+
+            Raises:
+                RuntimeError: If unable to retrieve active context.
+            """
+            result = subprocess.run(
+                ["az", "context", "show", "--query", "name", "--output", "tsv"],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"[AzureContext] Failed to get active context:\n{result.stderr.strip()}")
+            return result.stdout.strip()
+
+        @staticmethod
+        def list_contexts() -> list[str]:
+            """
+            Returns a list of all available Azure CLI contexts.
+
+            Returns:
+                list[str]: List of context names.
+            """
+            result = subprocess.run(
+                ["az", "context", "list", "--query", "[].name", "--output", "tsv"],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"[AzureContext] Failed to list contexts:\n{result.stderr.strip()}")
+            return result.stdout.strip().splitlines()
+
+    class AzureClientSecret:
+        """
+        One-time ephemeral Azure client secret generator.
+        Does NOT persist to disk, env, or key vault.
+        """
+
+        _temp_secret = None
+
+        @staticmethod
+        def create(client_id: str, hours_valid: int = 1) -> str:
+            """
+            Creates a temporary client secret and stores it in memory.
+
+            Args:
+                client_id (str): Azure AD application (client) ID.
+                hours_valid (int): Expiration in hours.
+
+            Returns:
+                str: The temporary client secret (in memory only).
+            """
+            if bm.AzureClientSecret._temp_secret:
+                return bm.AzureClientSecret._temp_secret
+
+            from datetime import datetime, timedelta
+            import subprocess
+
+            expiry = (datetime.utcnow() + timedelta(hours=hours_valid)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            cmd = [
+                "az", "ad", "app", "credential", "reset",
+                "--id", client_id,
+                "--append",
+                "--end-date", expiry,
+                "--query", "password",
+                "--output", "tsv"
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"[AzureClientSecret] Failed to create client secret:\n{result.stderr.strip()}")
+
+            secret = result.stdout.strip()
+            bm.AzureClientSecret._temp_secret = secret
+            return secret
+
+    class AzureIDs:
+        """
+        Loads and validates Azure identity values using Azure CLI and EnvLoader fallback.
+
+        Integrates with AzureContext for login/session prep. CLI has priority.
+        """
+
+        REQUIRED_KEYS = {
+            "AZURE_TENANT_ID": "Tenant ID",
+            "AZURE_CLIENT_ID": "Client ID",
+            "AZURE_CLIENT_SECRET": "Client Secret",  # not retrievable via CLI
+            "AZURE_SUBSCRIPTION_ID": "Subscription ID",
+            "KEY_VAULT_URL": "Key Vault URL"
+        }
+
+        @staticmethod
+        def _run_az(args: list[str]) -> str:
+            """
+            Runs an Azure CLI command and returns stdout.
+
+            Raises:
+                RuntimeError: If command fails.
+            """
+            try:
+                result = subprocess.run(["az"] + args, capture_output=True, text=True, check=True)
+                return result.stdout.strip()
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"[AzureIDs] az {' '.join(args)} failed:\n{e.stderr.strip()}")
+
+        @staticmethod
+        def _require_login(project: str):
+            bm.AzureContext.init_azure_context(project)
+
+        @staticmethod
+        def get(key: str, project: str, required: bool = True) -> str:
+            """
+            Gets an Azure identifier by trying CLI first, falling back to mc.env.
+
+            Args:
+                key (str): AZURE_* key to retrieve.
+                project (str): Project name for scope.
+                required (bool): Raise if key is missing.
+
+            Returns:
+                str or None
+            """
+            bm.AzureIDs._require_login(project)
+
+            try:
+                if key == "AZURE_TENANT_ID":
+                    return bm.AzureIDs._run_az(["account", "show", "--query", "tenantId", "--output", "tsv"])
+                elif key == "AZURE_SUBSCRIPTION_ID":
+                    return bm.AzureIDs._run_az(["account", "show", "--query", "id", "--output", "tsv"])
+                elif key == "AZURE_CLIENT_ID":
+                    app_name = mc.env.get(f"{project}.AZURE_APP_NAME", required=False)
+                    if not app_name:
+                        raise RuntimeError(f"[AzureIDs] AZURE_APP_NAME not set in config for project {project}")
+                    return bm.AzureIDs._run_az(
+                        ["ad", "app", "list", "--display-name", app_name, "--query", "[0].appId", "--output", "tsv"])
+                elif key == "KEY_VAULT_URL":
+                    return bm.AzureIDs._run_az(
+                        ["keyvault", "list", "--query", "[0].properties.vaultUri", "--output", "tsv"])
+                elif key == "AZURE_CLIENT_SECRET":
+                    # CLI cannot retrieve secrets. Must be in env or configured.
+                    raise RuntimeError("[AzureIDs] Cannot retrieve AZURE_CLIENT_SECRET via CLI. Must be set in env.")
+            except Exception as cli_error:
+                # fallback to mc.env
+                env_key = f"{project}.{key}"
+                val = mc.env.get(env_key, required=False)
+                if val:
+                    return val
+                if required:
+                    raise RuntimeError(f"[AzureIDs] Failed to resolve {key} via CLI or env.\n{cli_error}")
+                return None
+
+        @staticmethod
+        def validate_all(project: str) -> dict:
+            """
+            Validates and resolves all required Azure identity keys.
+
+            Raises:
+                RuntimeError: If any required keys are missing.
+            """
+            return {
+                key: bm.AzureIDs.get(key, project=project, required=True)
+                for key in bm.AzureIDs.REQUIRED_KEYS
+            }
+
+        # Shortcuts
+        @staticmethod
+        def tenant_id(project: str = None) -> str:
+            return bm.AzureIDs.get("AZURE_TENANT_ID", project)
+
+        @staticmethod
+        def client_id(project: str = None) -> str:
+            return bm.AzureIDs.get("AZURE_CLIENT_ID", project)
+
+        @staticmethod
+        def client_secret(project: str) -> str:
+            """
+            Retrieves or generates an in-memory temporary client secret.
+
+            Args:
+                project (str): Project scope (optional).
+
+            Returns:
+                str: A valid temporary client secret (never persisted).
+            """
+            client_id = bm.AzureIDs.client_id(project)
+
+            try:
+                return bm.AzureClientSecret.create(client_id, hours_valid=1)
+            except Exception as e:
+                raise RuntimeError(f"[AzureIDs] Failed to create in-memory client secret:\n{e}")
+
+        @staticmethod
+        def subscription_id(project) -> str:
+            return bm.AzureIDs.get("AZURE_SUBSCRIPTION_ID", project)
+
+        @staticmethod
+        def key_vault_url(project) -> str:
+            return bm.AzureIDs.get("KEY_VAULT_URL", project)
+
+    class VaultSetup:
+        """
+        Handles creation and initialization of an Azure Key Vault.
+        Requires:
+            - AZURE_SUBSCRIPTION_ID
+            - AZURE_TENANT_ID
+            - AZURE_CLIENT_ID
+            - AZURE_CLIENT_SECRET
+            - RESOURCE_GROUP
+            - VAULT_NAME
+            - LOCATION
+        """
+
+        @staticmethod
+        def create_vault(project: str = None) -> str:
+            ids = bm.AzureIDs.validate_all(project)
+            credential = DefaultAzureCredential()
+            subscription_id = ids["AZURE_SUBSCRIPTION_ID"]
+
+            vault_name = mc.env.get(f"{project}.VAULT_NAME")
+            resource_group = mc.env.get(f"{project}.RESOURCE_GROUP")
+            location = mc.env.get(f"{project}.LOCATION")
+
+            if not all([vault_name, resource_group, location]):
+                raise RuntimeError("Missing VAULT_NAME, RESOURCE_GROUP, or LOCATION in config.")
+
+            # Ensure resource group exists
+            res_client = ResourceManagementClient(credential, subscription_id)
+            try:
+                res_client.resource_groups.create_or_update(resource_group, {"location": location})
+            except Exception as e:
+                raise RuntimeError(f"Failed to create/update resource group: {e}")
+
+            # Set up vault client and create Key Vault
+            kv_client = KeyVaultManagementClient(credential, subscription_id)
+
+            access_policy = AccessPolicyEntry(
+                tenant_id=ids["AZURE_TENANT_ID"],
+                object_id=bm.VaultSetup.get_current_object_id(credential),
+                permissions=Permissions(
+                    keys=[KeyPermissions.get, KeyPermissions.list],
+                    secrets=[SecretPermissions.get, SecretPermissions.set, SecretPermissions.list],
+                    certificates=[CertificatePermissions.get]
+                )
+            )
+
+            params = VaultCreateOrUpdateParameters(
+                location=location,
+                properties={
+                    "tenant_id": ids["AZURE_TENANT_ID"],
+                    "sku": Sku(name=SkuName.standard),
+                    "access_policies": [access_policy],
+                    "enabled_for_deployment": True,
+                    "enabled_for_disk_encryption": True,
+                    "enabled_for_template_deployment": True
+                }
+            )
+
+            try:
+                result = kv_client.vaults.begin_create_or_update(resource_group, vault_name, params).result()
+                url = result.properties.vault_uri
+                mc.env.set(f"{project}.KEY_VAULT_URL", url)
+                mc.Logger.get_loguru().info(f"[VaultSetup] Vault created: {url}")
+                return url
+            except ResourceExistsError:
+                mc.Logger.get_loguru().info("[VaultSetup] Vault already exists.")
+                return f"https://{vault_name}.vault.azure.net/"
+            except Exception as e:
+                raise RuntimeError(f"[VaultSetup] Vault creation failed: {e}")
+
+        @staticmethod
+        def get_vault(project: str = None) -> dict:
+            """
+            Retrieves the existing Key Vault instance metadata.
+
+            Args:
+                project (str): Project scope. Defaults to selected project.
+
+            Returns:
+                dict: Vault metadata including URI, location, policies, etc.
+
+            Raises:
+                RuntimeError: If vault does not exist or lookup fails.
+            """
+            project = project or mc.env.get("selected_project_name")
+            subscription_id = bm.AzureIDs.subscription_id(project)
+            vault_name = mc.env.get(f"{project}.VAULT_NAME")
+            resource_group = mc.env.get(f"{project}.RESOURCE_GROUP")
+
+            if not vault_name or not resource_group:
+                raise RuntimeError("[VaultSetup] VAULT_NAME and RESOURCE_GROUP must be set in env.")
+
+            credential = DefaultAzureCredential()
+            kv_client = KeyVaultManagementClient(credential, subscription_id)
+
+            try:
+                vault = kv_client.vaults.get(resource_group_name=resource_group, vault_name=vault_name)
+                mc.Logger.get_loguru().info(f"[VaultSetup] Found existing vault: {vault.name}")
+                return {
+                    "name": vault.name,
+                    "location": vault.location,
+                    "id": vault.id,
+                    "uri": vault.properties.vault_uri,
+                    "policies": [p.object_id for p in vault.properties.access_policies],
+                    "enabled_for_template_deployment": vault.properties.enabled_for_template_deployment,
+                }
+            except Exception as e:
+                raise RuntimeError(f"[VaultSetup] Failed to retrieve vault: {e}")
+
+        @staticmethod
+        def get_current_object_id() -> str | None:
+            """
+            Tries to get the object ID of the signed-in Azure user or SP.
+
+            Returns:
+                str: The Azure AD object ID.
+            """
+            try:
+                # Try user identity first
+                result = subprocess.run(
+                    ["az", "ad", "signed-in-user", "show", "--query", "id", "--output", "tsv"],
+                    capture_output=True, text=True, check=True
+                )
+                return result.stdout.strip()
+            except subprocess.CalledProcessError:
+                try:
+                    # Try service principal fallback
+                    client_id = bm.AzureIDs.client_id()
+                    result = subprocess.run(
+                        ["az", "ad", "sp", "show", "--id", client_id, "--query", "objectId", "--output", "tsv"],
+                        capture_output=True, text=True, check=True
+                    )
+                    return result.stdout.strip()
+                except Exception as e:
+                    mc.Logger.get_loguru().warning(f"[VaultSetup] Failed to get object_id: {e}")
+                    return None
+
+        @staticmethod
+        def ensure_vault_ready(project: str = None) -> str:
+            """
+            Ensures that a Key Vault is ready and Secrets can access it.
+
+            If the vault does not exist, it will be created.
+            Initializes the Secrets vault client as a side effect.
+
+            Args:
+                project: Optional project name.
+
+            Returns:
+                str: The Vault URI.
+            """
+            project = project or mc.env.get("selected_project_name")
+
+            try:
+                uri = bm.VaultSetup.get_vault(project)["uri"]
+                mc.Logger.get_loguru().info(f"[VaultSetup] Vault found at {uri}")
+            except Exception:
+                uri = bm.VaultSetup.create_vault(project)
+
+            # Trigger client initialization so Secrets can be used right after
+            client = bm.Secrets.load_vault(project)
+            if not client:
+                raise RuntimeError("[VaultSetup] Failed to initialize Secrets client.")
+
+            return uri
+
+    class Secrets:
+        """
+        Secure secrets manager for retrieving and caching credentials.
+        Primary source: Azure Key Vault (guaranteed to be ready).
+        Fallback: OS environment variables.
+
+        Does not persist secrets to disk under any circumstances.
+        """
+
+        _cache = {}
+        _client = None
+
+        @staticmethod
+        def load_vault(project) -> SecretClient:
+            """
+            Ensures vault is initialized and returns a SecretClient.
+            """
+            if bm.Secrets._client:
+                return bm.Secrets._client
+
+            url = bm.VaultSetup.ensure_vault_ready(project)
+            try:
+                client = SecretClient(vault_url=url, credential=AZURE_CRED)
+                bm.Secrets._client = client
+                return client
+            except Exception as e:
+                raise RuntimeError(f"[Secrets] Failed to initialize SecretClient: {e}")
+
+        @staticmethod
+        def set(name: str, value: str, project: str) -> None:
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise TypeError("Secret name and value must be strings.")
+            bm.Secrets._cache[f"{project}.{name}"] = value
+
+        @staticmethod
+        def has(name: str, project: str) -> bool:
+            try:
+                return bm.Secrets.get(name=name, project=project, required=False) is not None
+            except Exception:
+                return False
+
+        @staticmethod
+        def get(name: str, project: str, required: bool = True, store: bool = True) -> str | None:
+            secret_key = f"{project}.{name}"
+
+            def return_secret(val):
+                if store:
+                    bm.Secrets._cache[secret_key] = val
+                return val
+
+            if secret_key in bm.Secrets._cache:
+                return return_secret(bm.Secrets._cache[secret_key])
+
+            try:
+                client = bm.Secrets.load_vault(project)
+                val = client.get_secret(secret_key).value
+                return return_secret(val)
+            except Exception:
+                pass
+
+            val = mc.env.get(secret_key)
+            if val:
+                return return_secret(val)
+
+            if required:
+                raise RuntimeError(f"[Secrets] Could not find secret: {secret_key}")
+            return None
+
+        @staticmethod
+        def get_list(project: str) -> list[str]:
+            client = bm.Secrets.load_vault(project)
+            prefix = f"{project}."
+            results = []
+            for prop in client.list_properties_of_secrets():
+                if prop.name.startswith(prefix):
+                    try:
+                        val = bm.Secrets.get(prop.name[len(prefix):], project=project, required=False)
+                        if val:
+                            results.append(prop.name)
+                    except Exception:
+                        continue
+            return results
+
+        @staticmethod
+        def make_list(project: str) -> dict[str, str]:
+            prefix = f"{project}."
+            return {
+                key[len(prefix):]: val
+                for key, val in bm.Secrets._cache.items()
+                if key.startswith(prefix)
+            }
+
+        @staticmethod
+        def preload_cache(secrets: dict[str, str], project: str) -> None:
+            if not isinstance(secrets, dict):
+                raise TypeError("Expected a dictionary of secrets.")
+            for k, v in secrets.items():
+                if not isinstance(k, str) or not isinstance(v, str):
+                    raise TypeError(f"Secret keys/values must be strings. Got {k}={v}")
+                bm.Secrets._cache[f"{project}.{k}"] = v
+
+        @staticmethod
+        def clear_cache() -> None:
+            bm.Secrets._cache.clear()
+            bm.Secrets._client = None
 
 bm = BackendMethods
 
@@ -2178,27 +3033,39 @@ class CLIDecorator:
     _global = ProjectAwareGroup(invoke_without_command=True)
     _projects = {}
     _project_only_cmds = []         # ← collect these here
+    _registered = False
 
     @staticmethod
-    @mileslib
+    @mileslib(retry=False)
     def auto_register_groups():
-        # 1) discover and register each project subgroup
-        for sub in ROOT.iterdir():
-            cfg = sub / f"mileslib_{sub.name}_settings.toml"
-            if not cfg.exists():
-                continue
+        """
+        Auto-registers Click command groups for each valid project
+        with a config TOML file.
+        """
+        if CLIDecorator._registered:
+            print("[CLIDecorator] Skipping auto_register_groups — already called.")
+            return
+        CLIDecorator._registered = True
 
-            proj_name = sub.name
-            if proj_name not in CLIDecorator._projects:
-                @click.group(name=proj_name, cls=ProjectAwareGroup)
+        for name, path in bm.ProjectUtils.discover_projects():
+            print(f"[auto_register] Registering project group: {name}")
+
+            def make_group(name: str, path: Path):
+                @click.group(name=name, cls=ProjectAwareGroup)
                 @click.pass_context
                 def _grp(ctx):
                     ctx.ensure_object(dict)
-                    ctx.obj["project_name"]      = proj_name
-                    ctx.obj["project_path"] = sub
+                    ctx.obj["project_name"] = name
+                    ctx.obj["project_path"] = path
+                    bm.ProjectUtils.select_project(name=name, path=path)
+                    print(f"[mileslib_settings.toml] Active project set to: {name}")
 
-                CLIDecorator._projects[proj_name] = _grp
-                CLIDecorator._global.add_command(_grp)
+                return _grp
+
+            if name not in CLIDecorator._projects:
+                grp = make_group(name, path)
+                CLIDecorator._projects[name] = grp
+                CLIDecorator._global.add_command(grp)
 
         for cmd in CLIDecorator._project_only_cmds:
             for grp in CLIDecorator._projects.values():
@@ -2268,6 +3135,34 @@ class CLI:
 
     class CMDManager:
         class Global:
+            class Diagnostics:
+                """
+                Runs system diagnostics to ensure required tools are installed.
+                """
+
+                @staticmethod
+                @mileslib_cli(project_only = False)
+                def diagnostics_check(ctx, tool: str):
+                    """
+                    CLI: Runs diagnostic checks for a list of tools.
+
+                    Args:
+                        tool (list[str]): List of tools to check. Use multiple --tool flags.
+
+                    Examples:
+                        $ python -m mileslib diagnostics-check --tool azure --tool docker
+                    """
+                    print(f"[diagnostics] Checking tools: {tool}")
+                    if tool == "all":
+                        try:
+                            Subprocess.ExternalDependency.ensure_all()
+                        except Exception as e:
+                            raise RuntimeError(f"Failed diagnostics check!: {e}")
+                    try:
+                        Subprocess.ExternalDependency.ensure(tool)
+                    except Exception as e:
+                        raise RuntimeError(f"Failed diagnostics check!: {e}")
+
             class InitializeProject:
                 @staticmethod
                 @mileslib_cli(project_only=False)  # or True, depending on scope
@@ -2361,271 +3256,37 @@ class CLI:
                         raise click.Abort()
 
         class Project:
-            # FastAPI callback listener and nested AzureBootstrap
-            app = FastAPI()
-
-            class AzureBootstrap:
-                tenant_id = None
-                client_id = None
-                redirect_uri = None
-                required = ["tenant_id", "client_id", "redirect_uri"]
-
+            class SecretsBootstrap:
                 @staticmethod
                 @mileslib_cli(project_only=True)
-                def azure_bootstrap(ctx):
+                def init_vault(ctx):
                     """
-                    Bootstraps an Azure AD application using the project_name's config.
-                    """
-                    #Top-Level Vars
-                    project_name = ctx.obj["project_name"]
-                    proj_path = ctx.obj["project_path"]
-                    cfg_path = proj_path / f"mileslib_{project_name}_settings.toml"
-                    ab = CLI.CMDManager.Project.AzureBootstrap
+                    CLI entrypoint to initialize Azure Key Vault for the current project.
 
-                    # Extract AAD settings
-                    def get_aad_settings(recall: bool = None) -> dict:
-                        sm.ensure_path(cfg_path)
-                        settings = {}
-
-                        def print_help_for_tenant_id():
-                            """
-                            Prints CLI-friendly guidance on how to retrieve your Azure AD Tenant ID.
-                            """
-                            print("How to find your Azure AD Tenant ID:")
-                            print("1. Visit the Azure Active Directory overview page:")
-                            print("   👉 https://portal.azure.com/#blade/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/Overview")
-                            print("2. Look for the 'Tenant ID' field — it will be a GUID (e.g., 12345678-90ab-cdef-1234-567890abcdef).")
-                            print("3. Copy and paste it when prompted.")
-
-                        def print_help_for_client_id():
-                            """
-                            Prints CLI-friendly guidance on how to retrieve your Azure AD Application (Client) ID.
-                            """
-                            print("How to find your Azure AD Application (Client) ID:")
-                            print("1. Open the App Registrations page:")
-                            print("   👉 https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade")
-                            print("2. Click on the application you've registered (or register a new one).")
-                            print("3. Copy the 'Application (client) ID' from the overview page.")
-                            print("4. Paste it here when prompted.")
-
-                        def alternatively():
-                            print(f"You can also can manually edit the config file here:")
-                            print(f"{cfg_path}")
-                            print("Under the [aad] section, provide:")
-                            print("tenant_id = \"your-tenant-guid\"")
-                            print("client_id = \"your-client-id\"")
-                            print("redirect_uri = \"http://localhost:8000/callback\"")
-
-                        for k in ab.required:
-                            v = None
-
-                            def validate_current_key():
-                                ab.ensure_valid_id(key=k, value=v)
-                                mc.cfg_write(path=cfg_path, set={"aad": {k: v}})
-                                setattr(ab, k, v)
-                                settings[k] = v
-                                print(f"[aad settings] Validated {k}: {v}")
-
-                            if recall is not True:
-                                try:
-                                    v = mc.cfg_get("aad", k, path=cfg_path)
-                                    validate_current_key()
-                                except Exception: v = None
-
-                            if v is None:
-                                time.sleep(1)
-                                log.error("[aad settings] Your tenant id is invalid or not present!") #type: ignore
-                                time.sleep(1)
-                                if k == "tenant_id":
-                                    print_help_for_tenant_id()
-                                elif k == "client_id":
-                                    print_help_for_client_id()
-                                time.sleep(1)
-                                alternatively()
-                                time.sleep(1)
-                                v = input(f"Please provide your {k}: ").strip()
-
-                            sm.recall(validate_current_key, lambda: get_aad_settings(recall=True))
-
-                            setattr(ab, k, v)
-                            print(f"Ensuring valid {k}...")
-                            settings[k] = v
-
-                        return settings
-
-                    aad_settings = get_aad_settings()
-
-                    def admin_consent():
-                        if not ab.consent_status(project_name):
-                            print("Launching admin consent flow...")
-                            try:
-                                ab.redirect_to_admin_consent(aad_settings)
-                                ab.wait_for_callback()
-                            except Exception as e:
-                                raise RuntimeError(f"Admin consent process failed!: {e}")
-                            print("Admin consent granted.")
-
-                    #Ensure Admin Consent Status
-                    admin_consent()
-
-                    # 2) App registration
-                    print("Registering AAD app '{}'...", project_name)
-                    app_id, object_id = ab.AAD.register_app(project_name)
-                    print("Registered appId={} objectId={}", app_id, object_id)
-
-                    # 3) Client secret
-                    print("Creating client secret for objectId={}...", object_id)
-                    secret = ab.AAD.add_client_secret(object_id)
-
-                    # 4) Vault storage
-                    print("Storing secrets in vault...")
-                    ab.Vault.store_secrets(app_id, secret, tenant_id)
-
-                    click.echo(f"✅ Azure bootstrap complete for '{project_name}'\n  AppId: {app_id}\n  Tenant: {tenant_id}")
-
-                @staticmethod
-                def ensure_valid_id(key: str, value: str):
-                    """
-                    Validates a single Azure AD identifier by checking against Microsoft endpoints.
+                    This will:
+                    - Validate environment and Azure config
+                    - Create the vault if missing
+                    - Set up access policies
+                    - Initialize the Secrets client for use
 
                     Args:
-                        key (str): One of ["tenant_id", "client_id", "redirect_uri"].
-                        value (str): The actual value to validate.
+                        ctx (click.Context): Click context with project_name and project_path
 
-                    Raises:
-                        RuntimeError: If key is unsupported or the identifier fails validation.
+                    Side Effects:
+                        - Ensures vault exists and is usable
+                        - Updates KEY_VAULT_URL in environment
+                        - Logs status
                     """
-                    sm.check_input(key, str, "key")
-                    sm.check_input(value, str, "value")
-                    key = key.lower()
+                    project_name = ctx.obj["project_name"]
+                    print(f"[SecretsBootstrap] Initializing vault for: {project_name}")
 
-                    if key == "tenant_id":
-                        url = f"https://login.microsoftonline.com/{value}/v2.0/.well-known/openid-configuration"
-                    elif key == "client_id":
-                        url = f"https://graph.microsoft.com/v1.0/applications?$filter=appId eq '{value}'"
-                    elif key == "redirect_uri":
-                        # Validate scheme + hostname format
-                        parsed = urlparse(value)
-                        if parsed.scheme not in ("https", "http") or not parsed.netloc:
-                            raise RuntimeError(f"[ensure_valid_id] Malformed redirect_uri: {value}")
-                        # Just check that the domain resolves at all
-                        url = value
-                    else:
-                        raise RuntimeError(f"[ensure_valid_id] Unsupported identifier type: {key}")
-
-                    if not BackendMethods.Requests.ensure_endpoint(url):
-                        raise RuntimeError(f"[ensure_valid_id] Validation failed for {key}: {value}")
-                    return True
-
-                @staticmethod
-                def consent_status(project_name, update: bool = None) -> bool:
-                    """
-                    :param update: If marked True or False, updates the env's recognition of consent.
-                    :return: bool: Returns update status.
-                    """
-                    k = f"{project_name}.azurebootstrap_user_has_consented"
-
-                    def update_env():
-                        u = str(update)
-                        mc.env.write(k, u)
-                        return mc.env.get(k)
-
-                    def check_env():
-                        dflt = str(False)
-                        c = (mc.env.get(k))
-                        if c is None:
-                            mc.env.write(k, dflt)
-                            return dflt
-                        return bool(c)
-
-                    if update: return update_env()
-                    else: return check_env()
-
-                @staticmethod
-                @mileslib(callback="/callback", logged=True)
-                def redirect_to_admin_consent(settings: dict):
-                    tenant_id = settings["tenant_id"]
-                    client_id = settings["client_id"]
-                    redirect_uri = settings["redirect_uri"]
-
-                    # Build the consent URL
-                    url = (
-                        f"https://login.microsoftonline.com/{tenant_id}/adminconsent"
-                        f"?client_id={client_id}&redirect_uri={redirect_uri}"
-                    )
-
-                    log.info(f"[aad] Opening admin consent flow in browser...") #type: ignore
-                    click.launch(url)
-
-                    # This function will pause until GET /callback is hit
-                    def handle_callback(data: dict):
-                        print(f"[aad] Admin consent granted: {data}")
-                        if "tenant" in data:
-                            print(f"[aad] Confirmed tenant ID: {data['tenant']}")
-                        else:
-                            print("[aad] Warning: No tenant ID in callback. Consent may have failed.")
-
-                    return handle_callback  # <-- async_callback wraps this
-
-                class MSALClient:
-                    @staticmethod
-                    def get_token():
-                        tenant = bm.Secrets.get("BOOTSTRAP_TENANT_ID")
-                        cid = bm.Secrets.get("BOOTSTRAP_CLIENT_ID")
-                        csec = bm.Secrets.get("BOOTSTRAP_CLIENT_SECRET")
-                        app = msal.ConfidentialClientApplication(
-                            client_id=cid,
-                            authority=f"https://login.microsoftonline.com/{tenant}",
-                            client_credential=csec
-                        )
-                        t = app.acquire_token_for_client(scopes=["https://graph.microsoft.com/.default"])
-                        return t.get("access_token")
-
-                class AAD:
-                    @staticmethod
-                    def register_app(name: str) -> tuple[str, str]:
-                        token = CLI.CMDManager.Project.AzureBootstrap.MSALClient.get_token()
-                        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-                        payload = {"displayName": name, "signInAudience": "AzureADMyOrg"}
-                        resp = bm.http_post("https://graph.microsoft.com/v1.0/applications", payload)
-                        data = resp.json()
-                        return data["appId"], data["id"]
-
-                    @staticmethod
-                    def add_client_secret(obj_id: str) -> str:
-                        token = CLI.CMDManager.Project.AzureBootstrap.MSALClient.get_token()
-                        payload = {"passwordCredential": {"displayName": "AutoGenSecret"}}
-                        resp = bm.http_post(
-                            f"https://graph.microsoft.com/v1.0/applications/{obj_id}/addPassword",
-                            payload
-                        )
-                        return resp.json()["secretText"]
-
-                class Vault:
-                    @staticmethod
-                    def store_secrets(app_id: str, secret: str, tenant_id: str):
-                        bm.Secrets.set("aad-app-id", app_id)
-                        bm.Secrets.set("aad-app-secret", secret)
-                        bm.Secrets.set("aad-tenant-id", tenant_id)
-
-                class Registry:
-                    tenants_db = {}
-
-                    @staticmethod
-                    def update(tenant_id: str):
-                        CLI.CMDManager.Project.AzureBootstrap.Registry.tenants_db[tenant_id] = {
-                            "consented": True,
-                            "created_at": datetime.utcnow().isoformat(),
-                            "apps": []
-                        }
-
-            @app.get("/callback", response_model=None)
-            def handle_callback(request: Request):
-                if request.query_params.get("admin_consent") == "True":
-                    tid = request.query_params.get("tenant")
-                    CLI.CMDManager.Project.AzureBootstrap.Registry.update(tid)
-                    return PlainTextResponse("Consent successful! Close this window.")
-                return PlainTextResponse("Consent failed or denied.")
+                    try:
+                        uri = bm.VaultSetup.ensure_vault_ready(project_name)
+                        print(f"[SecretsBootstrap] Vault ready at {uri}")
+                        click.echo(f"✅ Vault initialized: {uri}")
+                    except Exception as e:
+                        print(f"[SecretsBootstrap] Failed to initialize vault: {e}")
+                        raise click.ClickException(str(e))
 
             class DockerSetup:
                 """
