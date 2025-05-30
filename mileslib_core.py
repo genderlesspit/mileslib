@@ -2400,7 +2400,14 @@ class BackendMethods:
             tenant_id = input("Enter your Azure Tenant ID: ").strip()
             bm.AzureTenant.validate(tenant_id)
 
+            cfg_data = {
+                "aad": {
+                    "AZURE_TENANT_ID": f"{tenant_id}"
+                }
+            }
+            cfg_root = mc.env.get(f"{project}.config_dir")
             mc.env.write(key, tenant_id, replace_existing=True)
+            mc.cfg_write(project_root, set=cfg_data)
             print(f"[AzureTenant] Tenant ID set for project '{project}'")
             return tenant_id
 
@@ -2457,179 +2464,423 @@ class BackendMethods:
             print("🧠 Tip: It looks like a UUID (e.g. 72f988bf-86f1-41af-91ab-2d7cd011db47).")
             print("─────────────────────────────────────")
 
-    class AzureContext:
+    class AzureRBACSetup:
         """
-        Handles Azure CLI login context switching per project using `az context`.
-
-        Each project should define its Azure CLI context name (stored in env/config).
+        Handles Azure AD RBAC setup and validation within the tenant context.
+        Ensures user identity, global admin status, and ARM subscription routing.
         """
 
-        _cached_tenant_id = None
+        has_called_help = False
 
         @staticmethod
-        def _get_cached_tenant(project: str):
-            if bm.AzureContext._cached_tenant_id is None:
-                tenant_id = bm.AzureTenant.get(project)
-                bm.AzureContext._cached_tenant_id = tenant_id
-            return bm.AzureContext._cached_tenant_id
-
-        @staticmethod
-        @staticmethod
-        def ensure_az_installed():
+        def get_signed_in_user_id() -> str:
             """
-            Ensures Azure CLI is installed via winget (Windows-only).
-            Uses Subprocess.CMD to execute and validate install.
-
-            Raises:
-                RuntimeError: If install fails or az remains unavailable.
-            """
-            if shutil.which("az"):
-                return
-
-            if platform.system() != "Windows":
-                raise RuntimeError("[AzureInstaller] Auto-install only supported on Windows")
-
-            try:
-                Subprocess.CMD.run(
-                    ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"],
-                    force_global_shell=True
-                )
-            except subprocess.CalledProcessError as e:
-                msg = e.stderr.strip() if e.stderr else str(e)
-                raise RuntimeError(f"[AzureInstaller] winget install failed:\n{msg}")
-
-            if not shutil.which("az"):
-                raise RuntimeError("[AzureInstaller] Azure CLI install failed or not found in PATH")
-
-        @staticmethod
-        def azure_login(tenant_id: str):
-            """
-            Performs an interactive Azure CLI login for the given tenant.
-
-            Args:
-                tenant_id (str): The Azure Active Directory tenant ID.
-
-            Raises:
-                RuntimeError: If Azure CLI is not found or login fails.
-            """
-            if bm.AzureContext.azure_is_logged_in():
-                print("[AzureContext] Already authenticated. Skipping login.")
-                return
-
-            az_path = shutil.which("az")
-            if not az_path:
-                try:
-                    bm.AzureContext.ensure_az_installed()
-                    az_path = shutil.which("az")
-                    if not az_path:
-                        raise RuntimeError("[AzureContext] Azure CLI (az) still not found after attempted install.")
-                except Exception as install_err:
-                    raise RuntimeError(f"[AzureContext] Failed to ensure az is installed: {install_err}")
-
-            try:
-                Subprocess.CMD.run(
-                    [az_path, "login", "--tenant", tenant_id],
-                    force_global_shell=True
-                )
-                print("[AzureContext] Login successful.")
-            except subprocess.CalledProcessError as e:
-                msg = e.stderr.strip() if e.stderr else "unknown error"
-                raise RuntimeError(f"[AzureContext] Azure login failed:\n{msg}")
-
-        @staticmethod
-        def azure_is_logged_in() -> bool:
-            """
-            Checks if the Azure CLI is already authenticated.
+            Returns the object ID of the currently signed-in Azure CLI user.
 
             Returns:
-                bool: True if logged in, False otherwise.
+                str: Azure AD object ID.
             """
-            result = subprocess.run(
-                ["az", "account", "show"],
+            result = Subprocess.CMD.run(
+                ["az", "ad", "signed-in-user", "show", "--query", "id", "--output", "tsv"],
                 capture_output=True,
-                text=True
+                text=True,
+                force_global_shell=True
             )
-            return result.returncode == 0
+            return result.stdout.strip()
 
         @staticmethod
-        def init_azure_context(project: str):
+        def get_directory_roles(user_id: str) -> list[dict]:
             """
-            Ensures Azure CLI is installed, performs interactive login via CLI, and sets context.
+            Lists Azure AD directory role group memberships for the given user.
 
             Args:
-                project (str): Project name for environment-scoped login and context setting.
+                user_id (str): Azure AD object ID.
+
+            Returns:
+                list[dict]: Resolved role group metadata.
+            """
+            result = Subprocess.CMD.run(
+                ["az", "ad", "user", "get-member-groups",
+                 "--id", user_id,
+                 "--security-enabled-only", "false",
+                 "--output", "json"],
+                capture_output=True,
+                text=True,
+                force_global_shell=True
+            )
+            role_ids = json.loads(result.stdout)
+
+            resolved_roles = []
+            for rid in role_ids:
+                try:
+                    group = Subprocess.CMD.run(
+                        ["az", "ad", "group", "show", "--group", rid, "--output", "json"],
+                        capture_output=True,
+                        text=True,
+                        force_global_shell=True
+                    )
+                    resolved_roles.append(json.loads(group.stdout))
+                except subprocess.CalledProcessError:
+                    continue
+
+            return resolved_roles
+
+        @staticmethod
+        def is_global_admin(user_id: str = None) -> bool:
+            """
+            Determines if the user is a Global Administrator in the tenant.
+
+            Args:
+                user_id (str): Optional user object ID.
+
+            Returns:
+                bool: True if Global Administrator, False otherwise.
+            """
+            if not user_id:
+                user_id = bm.AzureRBACSetup.get_signed_in_user_id()
+
+            try:
+                result = Subprocess.CMD.run(
+                    ["az", "role", "management", "list-assigned",
+                     "--assignee", user_id,
+                     "--output", "json"],
+                    capture_output=True,
+                    text=True,
+                    force_global_shell=True
+                )
+                roles = json.loads(result.stdout)
+                return any("Global Administrator" in r.get("roleName", "") for r in roles)
+            except subprocess.CalledProcessError:
+                return False
+
+        @staticmethod
+        def assert_global_admin(user_id: str = None):
+            """
+            Raises if the current user is not a Global Administrator.
+
+            Args:
+                user_id (str): Optional user object ID.
 
             Raises:
-                RuntimeError: If Azure CLI is not installed or login fails.
+                RuntimeError: If not a Global Administrator.
             """
+            if not bm.AzureRBACSetup.is_global_admin(user_id):
+                raise RuntimeError("[AzureRBAC] ❌ Current user is not a Global Administrator.")
+            print("[AzureRBAC] ✅ Current user is a Global Administrator.")
+
+        @staticmethod
+        def ensure_subscription_for_tenant(tenant_id: str):
+            """
+            Ensures the signed-in user has an ARM subscription visible under the given tenant.
+
+            Args:
+                tenant_id (str): Azure tenant ID.
+
+            Raises:
+                RuntimeError: If no subscriptions exist.
+            """
+            try:
+                result = Subprocess.CMD.run(
+                    ["az", "account", "list",
+                     "--output", "json",
+                     "--query", f"[?tenantId=='{tenant_id}']"],
+                    capture_output=True,
+                    text=True,
+                    force_global_shell=True
+                )
+                subscriptions = json.loads(result.stdout)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"[AzureRBAC] Failed to list subscriptions: {e}")
+
+            if not subscriptions:
+                print("\n[AzureRBAC] 🚫 No subscriptions linked to this tenant.")
+                print("────────────────────────────────────────────")
+                print("To proceed, assign or move a subscription into this tenant.")
+                print("Instructions:")
+                print("  1. Log in to https://portal.azure.com/")
+                print("  2. Navigate to 'Subscriptions'.")
+                print("  3. Select the subscription you'd like to transfer.")
+                print("  4. Use 'Change directory' to move it to this tenant.")
+                print("  5. Re-run your command after propagation (~1–5 mins).")
+                print("────────────────────────────────────────────")
+                raise RuntimeError("[AzureRBAC] No subscriptions available in this tenant.")
+
+            print(f"[AzureRBAC] ✅ Found {len(subscriptions)} subscription(s) under tenant {tenant_id}.")
+
+        @staticmethod
+        def get_subscriptions_for_tenant(tenant_id: str) -> list[str]:
+            """
+            Returns a list of subscription IDs under a given tenant.
+
+            Args:
+                tenant_id (str): Azure AD tenant ID
+
+            Returns:
+                list[str]: List of subscription IDs
+            """
+            cmd = [
+                "az", "account", "list", "--output", "json",
+                "--query", f"[?tenantId=='{tenant_id}'].id"
+            ]
+            result = Subprocess.CMD.run(cmd, capture_output=True, text=True, force_global_shell=True)
+            try:
+                return json.loads(result.stdout)
+            except Exception as e:
+                raise RuntimeError(f"[AzureRBAC] Failed to parse subscriptions: {e}")
+
+        @staticmethod
+        def manual_elevation_portal_instructions(user_id: str, tenant_id: str, subscription_ids: list[str],
+                                                 role: str = "Owner"):
+            """
+            Provides manual Azure Portal instructions for elevating access:
+            - Azure RBAC role (per-subscription)
+            - Azure AD Global Administrator (tenant-level)
+
+            Args:
+                user_id (str): Azure Object ID of the signed-in user.
+                tenant_id (str): Azure AD tenant ID.
+                subscription_ids (list[str]): List of subscription IDs for RBAC elevation.
+                role (str): RBAC role to assign (default: 'Owner').
+            """
+            if bm.AzureRBACSetup.has_called_help:
+                return
+
+            bm.AzureRBACSetup.has_called_help = True
+
+            print(f"\n[AzureRBAC] ⚠️ Your current account lacks required permissions.")
+            print("[AzureRBAC] Follow these steps to manually elevate your access via the Azure Portal:\n")
+
+            # 🔹 Azure RBAC Elevation (Subscription-level)
+            print("🔹 SUBSCRIPTION OWNER ROLE (RBAC)")
+            for sub_id in subscription_ids:
+                print(f"\n🔸 Subscription ID: {sub_id}")
+                print(f"   1️⃣ Visit: https://portal.azure.com/#@{tenant_id}/resource/subscriptions/{sub_id}/overview")
+                print("   2️⃣ Click: Access control (IAM) > + Add > Add role assignment")
+                print(f"       - Role: {role}")
+                print("       - Assign access to: User, group, or service principal")
+                print(f"       - Select: Your user (Object ID: {user_id})")
+                print("   3️⃣ Click Save")
+                print("    🔄 Wait ~1-2 minutes for propagation.")
+
+            # 🛡️ Azure AD Directory Role Elevation (Tenant-level)
+            print("\n🔹 GLOBAL ADMIN ROLE (DIRECTORY)")
+            print(
+                f"   1️⃣ Visit: https://portal.azure.com/#blade/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/RolesAndAdministrators")
+            print("   2️⃣ Search: 'Global Administrator'")
+            print("   3️⃣ Click the role > + Add assignment")
+            print(f"       - Select your user (Object ID: {user_id})")
+            print("   4️⃣ Click Save")
+            print("    🔄 Wait ~1-2 minutes for propagation.")
+            print("   🧠 NOTE: This must be granted by an existing Global Administrator or Privileged Role Admin.")
+
+            time.sleep(3)
+            print("\nOnce you’ve completed these steps, rerun the setup.")
+            input("👉 Press ENTER to continue once elevation is complete...")
+
+    class AzureContext:
+        """
+        Azure environment initializer and validator.
+
+        Caches key information to avoid redundant CLI calls:
+        - tenant_id
+        - user_id
+        - subscription_ids
+        - logged_in
+        """
+
+        _cache = {
+            "tenant_id": None,
+            "user_id": None,
+            "subscription_ids": None,
+            "logged_in": False,
+        }
+
+        @staticmethod
+        def ensure_az_installed():
+            if shutil.which("az") or shutil.which("az.cmd"):
+                return
+            if platform.system() != "Windows":
+                raise RuntimeError("[AzureContext] Auto-install supported only on Windows.")
+            print("[AzureContext] 🛠 Installing Azure CLI via winget...")
+            Subprocess.CMD.run(
+                ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"],
+                force_global_shell=True
+            )
+
+        @staticmethod
+        def login_to_tenant(tenant_id: str):
+            """
+            Logs into the specified Azure tenant using CLI.
+            """
+            print(f"[AzureContext] 🔐 Logging into Azure tenant: {tenant_id}")
+            Subprocess.CMD.run(
+                ["az", "login", "--tenant", tenant_id, "--allow-no-subscriptions"],
+                force_global_shell=True
+            )
+            bm.AzureContext._cache["logged_in"] = True
+
+        @staticmethod
+        def init_azure_context(project: str, force: bool = False):
+            """
+            Initializes Azure context for a project, caching identity info.
+
+            Args:
+                project (str): The project name
+                force (bool): Force reinitialization
+            """
+            if bm.AzureContext._cache["logged_in"] and not force:
+                return
+
             if not project:
-                raise ValueError("[AzureContext] Project name is required for initialization.")
+                raise ValueError("[AzureContext] Project name is required.")
 
             bm.AzureContext.ensure_az_installed()
 
-            tenant_id = bm.AzureContext._get_cached_tenant(project)
-            if not tenant_id:
-                raise RuntimeError("[AzureContext] No cached tenant ID found for project.")
+            tenant_id = bm.AzureTenant.get(project)
+            bm.AzureContext._cache["tenant_id"] = tenant_id
 
-            try:
-                Subprocess.CMD.run(
-                    ["az", "login", "--tenant", tenant_id],
-                    force_global_shell=True
-                )
-                print("[AzureContext] Login successful.")
-            except subprocess.CalledProcessError as e:
-                msg = e.stderr.strip() if e.stderr else "unknown error"
-                raise RuntimeError(f"[AzureContext] Azure login failed:\n{msg}")
+            bm.AzureContext.login_to_tenant(tenant_id)
 
-            try:
-                Subprocess.CMD.run(
-                    ["az", "context", "set", "--name", project],
-                    force_global_shell=True
+            user_id = bm.AzureRBACSetup.get_signed_in_user_id()
+            bm.AzureContext._cache["user_id"] = user_id
+
+            bm.AzureRBACSetup.ensure_subscription_for_tenant(tenant_id)
+            subs = bm.AzureRBACSetup.get_subscriptions_for_tenant(tenant_id)
+            bm.AzureContext._cache["subscription_ids"] = subs
+
+            sm.recall(
+                lambda: bm.AzureContext.display_user_info(user_id),
+                lambda: bm.AzureRBACSetup.manual_elevation_portal_instructions(
+                    user_id, tenant_id, subs
                 )
-                print(f"[AzureContext] Azure context set to '{project}'")
-            except subprocess.CalledProcessError:
-                print(f"[AzureContext] No Azure CLI context named '{project}' found (optional).")
+            )
 
         @staticmethod
-        def get_active_context() -> str:
+        def display_user_info(user_id: str):
             """
-            Returns the name of the currently active Azure CLI context.
+            Prints current user's Azure directory roles and admin status.
+            """
+            print(f"[AzureContext] 👤 Signed-in Azure Object ID: {user_id}")
+
+            roles = bm.AzureRBACSetup.get_directory_roles(user_id)
+            if roles:
+                print("[AzureContext] 🧾 Directory roles:")
+                for r in roles:
+                    print(f"  - {r.get('displayName')} ({r.get('id')})")
+            else:
+                print("[AzureContext] ⚠️ No directory roles assigned.")
+
+            if bm.AzureRBACSetup.is_global_admin(user_id):
+                print("[AzureContext] ✅ User is a Global Administrator.")
+            else:
+                raise RuntimeWarning("[AzureContext] ⚠️ User is NOT a Global Administrator.")
+
+        @staticmethod
+        def get_context() -> dict:
+            """
+            Returns the current Azure context (cached).
+            """
+            return bm.AzureContext._cache.copy()
+
+    class AzureAppRegister:
+        """
+        Registers an Azure AD application and injects its details into project config.
+
+        Handles app creation, lookup, and config injection of AZURE_CLIENT_ID and AZURE_APP_NAME.
+        """
+
+        @staticmethod
+        def create_app(project: str, display_name: str = None) -> dict:
+            """
+            Creates a new Azure AD app for the given project.
+
+            Args:
+                project (str): The current project.
+                display_name (str, optional): Optional app name. Defaults to 'mileslib-{project}'.
 
             Returns:
-                str: Active context name.
+                dict: Dict with 'appId', 'displayName'.
 
             Raises:
-                RuntimeError: If unable to retrieve active context.
+                RuntimeError: If app creation or parsing fails.
             """
+            display_name = display_name or f"mileslib-{project}"
+            print(f"[AzureAppRegister] Creating Azure AD app: {display_name}")
+
             try:
                 result = Subprocess.CMD.run(
-                    ["az", "context", "show", "--query", "name", "--output", "tsv"],
+                    ["az", "ad", "app", "create", "--display-name", display_name],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    force_global_shell=True
                 )
-                return result.stdout.strip()
-            except subprocess.CalledProcessError as e:
-                msg = e.stderr.strip() if e.stderr else "unknown error"
-                raise RuntimeError(f"[AzureContext] Failed to get active context:\n{msg}")
+                app = json.loads(result.stdout)
+            except Exception as e:
+                raise RuntimeError(f"[AzureAppRegister] Failed to create app '{display_name}': {e}")
+
+            app_id = app.get("appId")
+            if not app_id:
+                raise RuntimeError("[AzureAppRegister] Missing 'appId' in app creation response.")
+
+            mc.env.write(f"{project}.AZURE_CLIENT_ID", app_id, replace_existing=True)
+            mc.env.write(f"{project}.AZURE_APP_NAME", display_name, replace_existing=True)
+
+            print(f"[AzureAppRegister] App created: {display_name} (client_id={app_id})")
+
+            return {
+                "appId": app_id,
+                "displayName": display_name
+            }
 
         @staticmethod
-        def list_contexts() -> list[str]:
+        def get_existing_app(project: str) -> dict:
             """
-            Returns a list of all available Azure CLI contexts.
+            Looks up an existing Azure AD app by display name from env.
+
+            Args:
+                project (str): The current project.
 
             Returns:
-                list[str]: List of context names.
+                dict: App info with 'appId' and 'displayName'.
+
+            Raises:
+                RuntimeError: If AZURE_APP_NAME is not set or app is not found.
             """
+            display_name = mc.env.get(f"{project}.AZURE_APP_NAME")
+            if not display_name:
+                raise RuntimeError(f"[AzureAppRegister] AZURE_APP_NAME not set in config for project '{project}'")
+
+            print(f"[AzureAppRegister] Looking up existing Azure AD app: {display_name}")
             try:
                 result = Subprocess.CMD.run(
-                    ["az", "context", "list", "--query", "[].name", "--output", "tsv"],
+                    ["az", "ad", "app", "list", "--display-name", display_name, "--query", "[0]", "--output", "json"],
                     capture_output=True,
-                    text=True
+                    text=True,
+                    force_global_shell=True
                 )
-                return result.stdout.strip().splitlines()
-            except subprocess.CalledProcessError as e:
-                msg = e.stderr.strip() if e.stderr else "unknown error"
-                raise RuntimeError(f"[AzureContext] Failed to list contexts:\n{msg}")
+                app = json.loads(result.stdout)
+                if not app.get("appId"):
+                    raise ValueError("appId missing in response")
+                return app
+            except Exception as e:
+                raise RuntimeError(f"[AzureAppRegister] Failed to retrieve existing app: {e}")
+
+        @staticmethod
+        def ensure_app(project: str) -> dict:
+            """
+            Ensures that an Azure AD app exists for the given project.
+
+            Args:
+                project (str): The current project.
+
+            Returns:
+                dict: App info with 'appId' and 'displayName'.
+            """
+            try:
+                return bm.AzureAppRegister.get_existing_app(project)
+            except Exception:
+                print(f"[AzureAppRegister] App not found. Creating new one for project: {project}")
+                return bm.AzureAppRegister.create_app(project)
 
     class AzureClientSecret:
         """
@@ -2666,13 +2917,69 @@ class BackendMethods:
                 "--query", "password",
                 "--output", "tsv"
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = Subprocess.CMD.run(cmd, capture_output=True, text=True, force_global_shell=True)
             if result.returncode != 0:
                 raise RuntimeError(f"[AzureClientSecret] Failed to create client secret:\n{result.stderr.strip()}")
 
             secret = result.stdout.strip()
             bm.AzureClientSecret._temp_secret = secret
             return secret
+
+    class AzureResourceGroup:
+        """
+        Manages Azure Resource Group creation and validation for a project.
+
+        Ensures that a named resource group exists and is linked to the active subscription.
+        """
+
+        @staticmethod
+        def ensure(project: str) -> str:
+            """
+            Ensures the resource group exists for the given project.
+
+            Args:
+                project (str): Project name.
+
+            Returns:
+                str: Name of the resource group.
+
+            Raises:
+                RuntimeError: If creation fails.
+            """
+            group_name = mc.env.get(f"{project}.RESOURCE_GROUP", required=False)
+            if not group_name:
+                group_name = f"{project}-rg"
+                mc.env.write(f"{project}.RESOURCE_GROUP", group_name, replace_existing=True)
+                print(f"[AzureResourceGroup] Auto-set resource group: {group_name}")
+
+            # Check if it exists
+            try:
+                print(f"[AzureResourceGroup] Checking if group exists: {group_name}")
+                result = Subprocess.CMD.run(
+                    ["az", "group", "show", "--name", group_name],
+                    capture_output=True,
+                    text=True,
+                    force_global_shell=True
+                )
+                print(f"[AzureResourceGroup] Group already exists: {group_name}")
+                return group_name
+            except subprocess.CalledProcessError:
+                print(f"[AzureResourceGroup] Group not found. Creating: {group_name}")
+
+            # Create group in the default or specified location
+            location = mc.env.get(f"{project}.AZURE_REGION", required=False) or "eastus"
+            result = Subprocess.CMD.run(
+                ["az", "group", "create", "--name", group_name, "--location", location],
+                capture_output=True,
+                text=True,
+                force_global_shell=True
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"[AzureResourceGroup] Failed to create resource group:\n{result.stderr.strip()}")
+
+            print(f"[AzureResourceGroup] Created resource group: {group_name}")
+            return group_name
 
     class AzureIDs:
         """
@@ -2686,19 +2993,15 @@ class BackendMethods:
             "AZURE_CLIENT_ID": "Client ID",
             "AZURE_CLIENT_SECRET": "Client Secret",  # not retrievable via CLI
             "AZURE_SUBSCRIPTION_ID": "Subscription ID",
-            "KEY_VAULT_URL": "Key Vault URL"
+            "KEY_VAULT_URL": "Key Vault URL",
+            "RESOURCE_GROUP": "Azure Resource Group"
         }
 
         @staticmethod
         def _run_az(args: list[str]) -> str:
-            """
-            Runs an Azure CLI command and returns stdout.
-
-            Raises:
-                RuntimeError: If command fails.
-            """
             try:
-                result = subprocess.run(["az"] + args, capture_output=True, text=True, check=True)
+                result = Subprocess.CMD.run(["az"] + args, capture_output=True, text=True, check=True,
+                                            force_global_shell=True)
                 return result.stdout.strip()
             except subprocess.CalledProcessError as e:
                 raise RuntimeError(f"[AzureIDs] az {' '.join(args)} failed:\n{e.stderr.strip()}")
@@ -2709,17 +3012,6 @@ class BackendMethods:
 
         @staticmethod
         def get(key: str, project: str, required: bool = True) -> str:
-            """
-            Gets an Azure identifier by trying CLI first, falling back to mc.env.
-
-            Args:
-                key (str): AZURE_* key to retrieve.
-                project (str): Project name for scope.
-                required (bool): Raise if key is missing.
-
-            Returns:
-                str or None
-            """
             bm.AzureIDs._require_login(project)
 
             try:
@@ -2730,17 +3022,27 @@ class BackendMethods:
                 elif key == "AZURE_CLIENT_ID":
                     app_name = mc.env.get(f"{project}.AZURE_APP_NAME", required=False)
                     if not app_name:
-                        raise RuntimeError(f"[AzureIDs] AZURE_APP_NAME not set in config for project {project}")
-                    return bm.AzureIDs._run_az(
-                        ["ad", "app", "list", "--display-name", app_name, "--query", "[0].appId", "--output", "tsv"])
+                        print(f"[AzureIDs] No AZURE_APP_NAME found for {project}. Attempting to register app.")
+                        result = bm.AzureAppRegister.ensure_app(project)
+                        app_name = result["displayName"]
+                        mc.env.write(f"{project}.AZURE_APP_NAME", app_name, replace_existing=True)
+                    existing_app = bm.AzureAppRegister.get_existing_app(project)
+                    app_id = existing_app.get("appId")
+                    if not app_id:
+                        raise RuntimeError(f"[AzureIDs] Failed to retrieve appId for {project} ({app_name})")
+                    mc.env.write(f"{project}.AZURE_CLIENT_ID", app_id, replace_existing=True)
+                    return app_id
+                elif key == "AZURE_CLIENT_SECRET":
+                    print(f"[AzureIDs] Generating one-time client secret for project: {project}")
+                    client_id = bm.AzureIDs.get("AZURE_CLIENT_ID", project=project, required=True)
+                    return bm.AzureClientSecret.create(client_id)
                 elif key == "KEY_VAULT_URL":
                     return bm.AzureIDs._run_az(
                         ["keyvault", "list", "--query", "[0].properties.vaultUri", "--output", "tsv"])
-                elif key == "AZURE_CLIENT_SECRET":
-                    # CLI cannot retrieve secrets. Must be in env or configured.
-                    raise RuntimeError("[AzureIDs] Cannot retrieve AZURE_CLIENT_SECRET via CLI. Must be set in env.")
+                elif key == "RESOURCE_GROUP":
+                    return bm.AzureResourceGroup.ensure(project)
+
             except Exception as cli_error:
-                # fallback to mc.env
                 env_key = f"{project}.{key}"
                 val = mc.env.get(env_key, required=False)
                 if val:
@@ -2751,18 +3053,11 @@ class BackendMethods:
 
         @staticmethod
         def validate_all(project: str) -> dict:
-            """
-            Validates and resolves all required Azure identity keys.
-
-            Raises:
-                RuntimeError: If any required keys are missing.
-            """
             return {
                 key: bm.AzureIDs.get(key, project=project, required=True)
                 for key in bm.AzureIDs.REQUIRED_KEYS
             }
 
-        # Shortcuts
         @staticmethod
         def tenant_id(project: str = None) -> str:
             return bm.AzureIDs.get("AZURE_TENANT_ID", project)
@@ -2773,17 +3068,7 @@ class BackendMethods:
 
         @staticmethod
         def client_secret(project: str) -> str:
-            """
-            Retrieves or generates an in-memory temporary client secret.
-
-            Args:
-                project (str): Project scope (optional).
-
-            Returns:
-                str: A valid temporary client secret (never persisted).
-            """
             client_id = bm.AzureIDs.client_id(project)
-
             try:
                 return bm.AzureClientSecret.create(client_id, hours_valid=1)
             except Exception as e:
@@ -2797,104 +3082,235 @@ class BackendMethods:
         def key_vault_url(project) -> str:
             return bm.AzureIDs.get("KEY_VAULT_URL", project)
 
-    class VaultSetup:
+        @staticmethod
+        def resource_group(project) -> str:
+            return bm.AzureIDs.get("RESOURCE_GROUP", project)
+
+    class GraphInitialization:
         """
-        Handles creation and initialization of an Azure Key Vault.
-        Requires:
-            - AZURE_SUBSCRIPTION_ID
-            - AZURE_TENANT_ID
-            - AZURE_CLIENT_ID
-            - AZURE_CLIENT_SECRET
-            - RESOURCE_GROUP
-            - VAULT_NAME
-            - LOCATION
+        Handles Microsoft Graph API authentication and session initialization.
+
+        Supports:
+        - Token acquisition using client credentials
+        - Scope validation
+        - Cached session with bearer token
         """
+
+        _session = None
+        _token = None
+        _scopes = ["https://graph.microsoft.com/.default"]
 
         @staticmethod
-        def create_vault(project: str = None) -> str:
-            ids = bm.AzureIDs.validate_all(project)
-            credential = DefaultAzureCredential()
-            subscription_id = ids["AZURE_SUBSCRIPTION_ID"]
-
-            vault_name = mc.env.get(f"{project}.VAULT_NAME")
-            resource_group = mc.env.get(f"{project}.RESOURCE_GROUP")
-            location = mc.env.get(f"{project}.LOCATION")
-
-            if not all([vault_name, resource_group, location]):
-                raise RuntimeError("Missing VAULT_NAME, RESOURCE_GROUP, or LOCATION in config.")
-
-            # Ensure resource group exists
-            res_client = ResourceManagementClient(credential, subscription_id)
-            try:
-                res_client.resource_groups.create_or_update(resource_group, {"location": location})
-            except Exception as e:
-                raise RuntimeError(f"Failed to create/update resource group: {e}")
-
-            # Set up vault client and create Key Vault
-            kv_client = KeyVaultManagementClient(credential, subscription_id)
-
-            access_policy = AccessPolicyEntry(
-                tenant_id=ids["AZURE_TENANT_ID"],
-                object_id=bm.VaultSetup.get_current_object_id(credential),
-                permissions=Permissions(
-                    keys=[KeyPermissions.get, KeyPermissions.list],
-                    secrets=[SecretPermissions.get, SecretPermissions.set, SecretPermissions.list],
-                    certificates=[CertificatePermissions.get]
-                )
-            )
-
-            params = VaultCreateOrUpdateParameters(
-                location=location,
-                properties={
-                    "tenant_id": ids["AZURE_TENANT_ID"],
-                    "sku": Sku(name=SkuName.standard),
-                    "access_policies": [access_policy],
-                    "enabled_for_deployment": True,
-                    "enabled_for_disk_encryption": True,
-                    "enabled_for_template_deployment": True
-                }
-            )
-
-            try:
-                result = kv_client.vaults.begin_create_or_update(resource_group, vault_name, params).result()
-                url = result.properties.vault_uri
-                mc.env.set(f"{project}.KEY_VAULT_URL", url)
-                mc.Logger.get_loguru().info(f"[VaultSetup] Vault created: {url}")
-                return url
-            except ResourceExistsError:
-                mc.Logger.get_loguru().info("[VaultSetup] Vault already exists.")
-                return f"https://{vault_name}.vault.azure.net/"
-            except Exception as e:
-                raise RuntimeError(f"[VaultSetup] Vault creation failed: {e}")
-
-        @staticmethod
-        def get_vault(project: str = None) -> dict:
+        def _get_credentials(project: str) -> tuple[str, str, str]:
             """
-            Retrieves the existing Key Vault instance metadata.
-
-            Args:
-                project (str): Project scope. Defaults to selected project.
+            Loads Graph credentials from environment or fallback config.
 
             Returns:
-                dict: Vault metadata including URI, location, policies, etc.
+                tuple: (tenant_id, client_id, client_secret)
+            """
+            tenant_id = bm.AzureIDs.tenant_id(project)
+            client_id = bm.AzureIDs.client_id(project)
+            client_secret = bm.AzureIDs.client_secret(project)
+            return tenant_id, client_id, client_secret
 
-            Raises:
-                RuntimeError: If vault does not exist or lookup fails.
+        @staticmethod
+        def get_token(project: str) -> str:
+            """
+            Acquires and caches a bearer token from Microsoft Graph.
+
+            Args:
+                project (str): The active project name
+
+            Returns:
+                str: Bearer token
+            """
+            if bm.GraphInitialization._token:
+                return bm.GraphInitialization._token
+
+            import requests
+
+            tenant_id, client_id, client_secret = bm.GraphInitialization._get_credentials(project)
+            token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+            data = {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": " ".join(bm.GraphInitialization._scopes),
+                "grant_type": "client_credentials",
+            }
+
+            resp = requests.post(token_url, data=data)
+            if resp.status_code != 200:
+                raise RuntimeError(f"[GraphInit] Token request failed: {resp.text}")
+
+            token = resp.json().get("access_token")
+            if not token:
+                raise RuntimeError("[GraphInit] No access token in response.")
+
+            bm.GraphInitialization._token = token
+            return token
+
+        @staticmethod
+        def get_session(project: str):
+            """
+            Returns a cached requests.Session with Graph token authorization.
+
+            Args:
+                project (str): Project name for config
+
+            Returns:
+                requests.Session: Authenticated session
+            """
+            import requests
+
+            if bm.GraphInitialization._session:
+                return bm.GraphInitialization._session
+
+            token = bm.GraphInitialization.get_token(project)
+            session = requests.Session()
+            session.headers.update({
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            })
+            bm.GraphInitialization._session = session
+            return session
+
+        @staticmethod
+        def test_connection(project: str):
+            """
+            Performs a test query to confirm Graph connectivity and token validity.
+            """
+            session = bm.GraphInitialization.get_session(project)
+            resp = session.get("https://graph.microsoft.com/v1.0/me")
+
+            if resp.status_code != 200:
+                raise RuntimeError(f"[GraphInit] Test connection failed: {resp.text}")
+
+            print("[GraphInit] ✅ Microsoft Graph API authenticated and reachable.")
+
+    class VaultSetup:
+        """
+        Handles creation and validation of Azure Key Vaults for a given project context.
+
+        Expects per-project environment variables:
+        - {project}.AZURE_SUBSCRIPTION_ID
+        - {project}.AZURE_TENANT_ID
+        - {project}.AZURE_CLIENT_ID
+        - {project}.AZURE_CLIENT_SECRET (ephemeral only)
+        - {project}.RESOURCE_GROUP
+        - {project}.VAULT_NAME (auto-generated if missing)
+        - {project}.AZURE_REGION (defaults to 'eastus')
+        """
+
+        @staticmethod
+        def ensure_vault_ready(project: str = None) -> str:
+            """
+            Main CLI entrypoint. Ensures vault exists and Secrets client is initialized.
+
+            Returns:
+                str: Vault URI
             """
             project = project or mc.env.get("selected_project_name")
             subscription_id = bm.AzureIDs.subscription_id(project)
-            vault_name = mc.env.get(f"{project}.VAULT_NAME")
-            resource_group = mc.env.get(f"{project}.RESOURCE_GROUP")
+            region = mc.env.get(f"{project}.AZURE_REGION", required=False) or "eastus"
 
-            if not vault_name or not resource_group:
-                raise RuntimeError("[VaultSetup] VAULT_NAME and RESOURCE_GROUP must be set in env.")
-
-            credential = DefaultAzureCredential()
-            kv_client = KeyVaultManagementClient(credential, subscription_id)
+            bm.VaultSetup.list_existing_vaults(subscription_id, region)
 
             try:
-                vault = kv_client.vaults.get(resource_group_name=resource_group, vault_name=vault_name)
-                mc.Logger.get_loguru().info(f"[VaultSetup] Found existing vault: {vault.name}")
+                vault = bm.VaultSetup.get_vault(project)
+                print(f"[VaultSetup] ✅ Vault already exists: {vault['name']} ({vault['uri']})")
+                uri = vault["uri"]
+            except Exception as e:
+                print(f"[VaultSetup] ⚠️ Vault not found. Creating... ({e})")
+                uri = bm.VaultSetup.create_vault(project)["uri"]
+
+            if not bm.Secrets.load_vault(project):
+                raise RuntimeError("[VaultSetup] ❌ Failed to initialize Secrets client.")
+
+            return uri
+
+        @staticmethod
+        def list_existing_vaults(subscription_id: str, region: str = None) -> list:
+            """
+            Lists Key Vaults under a given subscription, optionally filtered by region.
+            """
+            cmd = ["az", "keyvault", "list", "--subscription", subscription_id, "--output", "json"]
+            result = Subprocess.CMD.run(cmd, capture_output=True, text=True, force_global_shell=True)
+            vaults = json.loads(result.stdout)
+
+            if region:
+                vaults = [v for v in vaults if v.get("location", "").lower() == region.lower()]
+
+            print(
+                f"[VaultSetup] 🔍 Found {len(vaults)} vault(s) in {subscription_id}{' (region=' + region + ')' if region else ''}")
+            for v in vaults:
+                print(f"  - {v['name']} ({v['location']})")
+
+            return vaults
+
+        @staticmethod
+        def create_vault(project: str) -> dict:
+            """
+            Creates a new Key Vault in the given project's resource group.
+
+            Returns:
+                dict: Vault name and URI.
+            """
+            project = project or mc.env.get("selected_project_name")
+            vault_name = mc.env.get(f"{project}.VAULT_NAME", required=False) or f"{project.lower()}-vault"
+            mc.env.write(f"{project}.VAULT_NAME", vault_name, replace_existing=True)
+
+            location = mc.env.get(f"{project}.AZURE_REGION", required=False) or "eastus"
+            resource_group = bm.AzureIDs.resource_group(project)
+
+            print(f"[VaultSetup] 🚀 Creating vault '{vault_name}' in group '{resource_group}' (region={location})")
+
+            Subprocess.CMD.run(
+                ["az", "keyvault", "create",
+                 "--name", vault_name,
+                 "--location", location,
+                 "--resource-group", resource_group,
+                 "--enable-rbac-authorization", "true"],
+                capture_output=True, text=True, force_global_shell=True
+            )
+
+            result = Subprocess.CMD.run(
+                ["az", "keyvault", "show",
+                 "--name", vault_name,
+                 "--resource-group", resource_group,
+                 "--query", "properties.vaultUri", "--output", "tsv"],
+                capture_output=True, text=True, force_global_shell=True
+            )
+
+            # New: Print stdout and stderr on failure
+            if result.returncode != 0:
+                print(f"[VaultSetup] ❌ az CLI failed (code={result.returncode})")
+                print(f"stdout: {result.stdout.strip()}")
+                print(f"stderr: {result.stderr.strip()}")
+
+            uri = result.stdout.strip()
+            print(f"[VaultSetup] ✅ Vault created: {vault_name} ({uri})")
+            return {"name": vault_name, "uri": uri}
+
+        @staticmethod
+        def get_vault(project: str) -> dict:
+            """
+            Returns metadata for an existing vault using Azure SDK.
+
+            Returns:
+                dict: Vault metadata
+            """
+            from azure.mgmt.keyvault import KeyVaultManagementClient
+            from azure.identity import DefaultAzureCredential
+
+            project = project or mc.env.get("selected_project_name")
+            subscription_id = bm.AzureIDs.subscription_id(project)
+            vault_name = mc.env.get(f"{project}.VAULT_NAME", required=True)
+            resource_group = bm.AzureIDs.resource_group(project)
+
+            try:
+                client = KeyVaultManagementClient(DefaultAzureCredential(), subscription_id)
+                vault = client.vaults.get(resource_group_name=resource_group, vault_name=vault_name)
+
                 return {
                     "name": vault.name,
                     "location": vault.location,
@@ -2904,64 +3320,29 @@ class BackendMethods:
                     "enabled_for_template_deployment": vault.properties.enabled_for_template_deployment,
                 }
             except Exception as e:
-                raise RuntimeError(f"[VaultSetup] Failed to retrieve vault: {e}")
+                raise RuntimeError(f"[VaultSetup] Failed to retrieve vault '{vault_name}': {e}")
 
         @staticmethod
         def get_current_object_id() -> str | None:
             """
-            Tries to get the object ID of the signed-in Azure user or SP.
-
-            Returns:
-                str: The Azure AD object ID.
+            Returns the Azure Object ID of the signed-in user or service principal.
             """
             try:
-                # Try user identity first
-                result = subprocess.run(
+                result = Subprocess.CMD.run(
                     ["az", "ad", "signed-in-user", "show", "--query", "id", "--output", "tsv"],
-                    capture_output=True, text=True, check=True
+                    capture_output=True, text=True, check=True, force_global_shell=True
                 )
                 return result.stdout.strip()
             except subprocess.CalledProcessError:
                 try:
-                    # Try service principal fallback
                     client_id = bm.AzureIDs.client_id()
-                    result = subprocess.run(
+                    result = Subprocess.CMD.run(
                         ["az", "ad", "sp", "show", "--id", client_id, "--query", "objectId", "--output", "tsv"],
-                        capture_output=True, text=True, check=True
+                        capture_output=True, text=True, check=True, force_global_shell=True
                     )
                     return result.stdout.strip()
                 except Exception as e:
-                    mc.Logger.get_loguru().warning(f"[VaultSetup] Failed to get object_id: {e}")
-                    return None
-
-        @staticmethod
-        def ensure_vault_ready(project: str = None) -> str:
-            """
-            Ensures that a Key Vault is ready and Secrets can access it.
-
-            If the vault does not exist, it will be created.
-            Initializes the Secrets vault client as a side effect.
-
-            Args:
-                project: Optional project name.
-
-            Returns:
-                str: The Vault URI.
-            """
-            project = project or mc.env.get("selected_project_name")
-
-            try:
-                uri = bm.VaultSetup.get_vault(project)["uri"]
-                mc.Logger.get_loguru().info(f"[VaultSetup] Vault found at {uri}")
-            except Exception:
-                uri = bm.VaultSetup.create_vault(project)
-
-            # Trigger client initialization so Secrets can be used right after
-            client = bm.Secrets.load_vault(project)
-            if not client:
-                raise RuntimeError("[VaultSetup] Failed to initialize Secrets client.")
-
-            return uri
+                    raise RuntimeWarning(f"[VaultSetup] Could not resolve objectId: {e}")
 
     class Secrets:
         """
@@ -3276,7 +3657,12 @@ class CLI:
                         "database_name": db_name,
                     }
                     print("[debug] raw proj_details_list:", proj_details_list)
+
+                    # ─── ENV & Config ────────────────────────────────────────────────
                     proj_details = mc.Config.configify(proj_details_list)
+                    for key in proj_details_list:
+                        val = proj_details_list[key]
+                        mc.env.write(f"{project_name}.{key}", f"{val}", replace_existing=True)
 
                     # ─── Django ────────────────────────────────────────────────
                     def init_django():
