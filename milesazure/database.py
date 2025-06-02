@@ -4,9 +4,9 @@ import time
 from typing import Optional, Dict, Any
 import subprocess
 
-from milesazure.ids import AzureIDs
 from milesazure.run import run_az
-from milesazure.vault import Passwords  # for admin password retrieval
+from milesazure.tenant import AzureSubscription, AzureResourceGroup
+from milesazure.vault import Passwords, Secrets  # for admin password retrieval
 import context.milescontext as mc
 
 logger = logging.getLogger(__name__)
@@ -40,9 +40,7 @@ class DatabaseSetup:
             raise RuntimeError(msg)
 
         try:
-            subscription_id = AzureIDs.get("AZURE_SUBSCRIPTION_ID", project)
-            resource_group = AzureIDs.get("RESOURCE_GROUP", project)
-            region = AzureIDs.get("AZURE_REGION", project, required=False) or "eastus"
+            resource_group = mc.cache.get(project,"RESOURCE_GROUP", AzureResourceGroup.get(project))
             db_name = f"{project}-db"
         except RuntimeError as e:
             logger.error(f"[DatabaseSetup] Failed to resolve AzureIDs: {e}")
@@ -71,10 +69,10 @@ class DatabaseSetup:
             }
         """
         db_name = f"{project}-db"
-        resource_group = AzureIDs.get("RESOURCE_GROUP", project)
-        region = AzureIDs.get("AZURE_REGION", project, required=False) or "eastus"
+        resource_group = mc.cache.get(project,"RESOURCE_GROUP", AzureResourceGroup.get(project))
+        region = mc.cache.get("AZURE_REGION", project) or "eastus"
         admin_user = "adminuser"
-        admin_pass = Passwords.get(f"{db_name}.PASSWORD", project)
+        admin_pass = Secrets.get(f"{db_name}_DB_PASSWORD", project)
 
         logger.info(f"[DatabaseSetup] 🚀 Creating Azure PostgreSQL server: {db_name}")
         run_az(
