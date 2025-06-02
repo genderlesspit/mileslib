@@ -62,6 +62,5 @@ class ProjectUtils:
         Returns:
             str: Resolved or generated database name
         """
-        db_name = mc.env.get(f"{project}.DB_NAME", required=False) or f"{project.lower()}-pg"
-        mc.env.write(f"{project}.DB_NAME", db_name, replace_existing=True)
+        db_name = f"{project}-db"
         return db_name

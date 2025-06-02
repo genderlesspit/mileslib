@@ -5,8 +5,8 @@ import uvicorn
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
+from milesazure.identity import DefaultAzureCredential
+from milesazure.keyvault.secrets import SecretClient
 from datetime import datetime
 from threading import Thread
 from webbrowser import open_new_tab

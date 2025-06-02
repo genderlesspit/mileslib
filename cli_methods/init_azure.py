@@ -1,4 +1,5 @@
-from azure import ids
+from milesazure import ids
+from milesazure.vault import VaultSetup
 
 def init_azure(ctx):
     """
@@ -15,4 +16,6 @@ def init_azure(ctx):
         raise ValueError("[init_azure] ctx.obj missing 'project_name'")
 
     print(f"[init_azure] Validating Azure identity for project: {project}")
-    return ids.AzureIDs.validate_all(project)
+    ids.AzureIDs.validate_all(project)
+    ids.AzureServices.validate_all(project)
+

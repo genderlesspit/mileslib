@@ -408,7 +408,7 @@ MilesLib `init` should generate a deploy-ready project skeleton with:
 ### Command
 
 ```bash
-mileslib init project-name --stack azure-hybrid
+mileslib init project-name --stack milesazure-hybrid
 ```
 
 ### It Auto-Generates:

@@ -155,7 +155,7 @@ class CLI:
                     tool (list[str]): List of tools to check. Use multiple --tool flags.
 
                 Examples:
-                    $ python -m mileslib diagnostics-check --tool azure --tool docker
+                    $ python -m mileslib diagnostics-check --tool milesazure --tool docker
                 """
                 ml.clim.check_dependencies(tool)
 

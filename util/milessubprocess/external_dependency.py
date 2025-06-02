@@ -8,7 +8,7 @@ from util.milessubprocess.cmd import CMD
 
 class ExternalDependency:
     INSTALLERS = {
-        "azure": {
+        "milesazure": {
             "check": "az",
             "method": "winget",
             "args": ["winget", "install", "--id", "Microsoft.AzureCLI", "-e", "--source", "winget"]
@@ -115,7 +115,7 @@ class ExternalDependency:
                 break
 
         # ✅ Fallback path for Azure CLI
-        if tool == "azure":
+        if tool == "milesazure":
             fallback = Path("C:/Program Files (x86)/Microsoft SDKs/Azure/CLI2/wbin/az.cmd")
             if fallback.exists():
                 print(f"\r[Installer] ✅ {tool} available at fallback: {fallback}")

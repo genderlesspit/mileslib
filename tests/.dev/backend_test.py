@@ -5,8 +5,8 @@ import requests
 from tests.mileslib_core import MilesContext as mc, GLOBAL_TEMPLATES_DIR
 from tests.mileslib_core import StaticMethods as sm
 from tests.mileslib_core import mileslib
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
+from milesazure.identity import DefaultAzureCredential
+from milesazure.keyvault.secrets import SecretClient
 
 DEFAULT_PROJECT_NAME = "default_project"
 CURRENT_PROJECT_NAME = mc.cfg_get("selected_project")

@@ -2,9 +2,11 @@ import json
 import logging
 from typing import Dict, Optional, Any
 
-from azure import tenant  # tenant.user, tenant.tenant_id, tenant.subscription_id
-from azure.run import run_az
+from milesazure import tenant  # tenant.user, tenant.tenant_id, tenant.subscription_id
+from milesazure.run import run_az
 from context import milescontext as mc  # mc.cache is the Cache instance
+from milesazure.tenant import AzureSubscription
+from util.error_handling import recall
 
 logger = logging.getLogger(__name__)
 
@@ -133,10 +135,9 @@ class AzureClient:
             )
 
         # 4. Ensure a Service Principal exists
-        sp_object_id = AzureClient.ensure_service_principal(app_id)
-
-        # 5. Assign Global Administrator role
-        AzureClient.assign_global_admin(sp_object_id, project)
+        sp_object_id = AzureClient.ensure_service_principal(project, app_id)
+        #5.5 Assign Global Administrator role
+        #5.9 Assign RBAC
 
         # 6. Ensure a temporary client secret is cached
         existing_secret = mc.cache.temp_get(project, "client_secret")
@@ -246,13 +247,14 @@ class AzureClient:
         return new_app_id
 
     @staticmethod
-    def ensure_service_principal(app_id: str) -> str:
+    def ensure_service_principal(project: str, app_id: str) -> str:
         """
         Ensure that a Service Principal exists for the AAD application with `app_id`.
         Returns the Service Principal's object ID. If an existing SP is found but lacks
         `objectId`, re-fetch via `az ad sp show --id` or recreate the SP.
 
         Args:
+            project (str): The project name.
             app_id (str): The GUID of the AAD application.
 
         Returns:
@@ -290,38 +292,36 @@ class AzureClient:
         """
 
         def _fetch_sp_via_show() -> Optional[Dict[str, Any]]:
-            try:
-                return run_az(["az", "ad", "sp", "show", "--id", app_id])
-            except Exception:
-                return None
+            result = run_az(
+                ["az", "ad", "sp", "show", "--id", app_id],
+                ignore_errors={"not_found": ["does not exist", "not present"]}
+            )
+            return result or None
 
         def _fetch_sp_via_list() -> Optional[Dict[str, Any]]:
-            try:
-                sp_list = run_az([
+            sp_list = run_az(
+                [
                     "az", "ad", "sp", "list",
                     "--filter", f"appId eq '{app_id}'"
-                ])
-                if isinstance(sp_list, list) and sp_list:
-                    return sp_list[0]
-            except Exception:
-                pass
+                ],
+                ignore_errors={"not_found": ["does not exist", "not present", "No matching"]}  # loose filter
+            )
+            if isinstance(sp_list, list) and sp_list:
+                return sp_list[0]
             return None
 
+
         def _extract_object_id(sp_dict: Dict[str, Any]) -> Optional[str]:
-            # Some AAD SP responses use "objectId"; others might use "id"
             return sp_dict.get("objectId") or sp_dict.get("id")
 
         def _create_new_sp() -> str:
             try:
-                create_sp = run_az([
-                    "az", "ad", "sp", "create",
-                    "--id", app_id
-                ])
+                create_sp = run_az(["az", "ad", "sp", "create", "--id", app_id])
             except Exception as ex:
                 raise RuntimeError(
                     f"[AzureClient] Failed to create Service Principal for appId={app_id}: {ex}"
                 )
-            new_obj_id = create_sp.get("objectId") or create_sp.get("id")
+            new_obj_id = _extract_object_id(create_sp)
             if not new_obj_id:
                 raise RuntimeError(
                     f"[AzureClient] SP creation succeeded but no objectId returned for appId={app_id}."
@@ -329,37 +329,57 @@ class AzureClient:
             logger.info(f"[AzureClient] Created new Service Principal with objectId={new_obj_id}")
             return new_obj_id
 
-        # ─────────────────────────────────
-        # 1. Attempt direct 'show' lookup
-        # ─────────────────────────────────
+        def verify(sp_object_id, project):
+            try:
+                AzureClient.assign_global_admin(sp_object_id, project)
+                AzureClient.assign_rbac(sp_object_id, project)
+            except Exception as e:
+                raise RuntimeError(f"{e}")
+            return sp_object_id
+
+        # ─────────────────────────────
+        # 1. Attempt 'show' lookup
+        # ─────────────────────────────
         sp_via_show = _fetch_sp_via_show()
         if sp_via_show:
             sp_obj_id = _extract_object_id(sp_via_show)
             if sp_obj_id:
                 logger.debug(f"[AzureClient] Found SP via 'show' with objectId={sp_obj_id}")
                 return sp_obj_id
-            logger.warning(
-                f"[AzureClient] SP record via 'show' lacked objectId for appId={app_id}."
-            )
+            logger.warning(f"[AzureClient] SP record via 'show' lacked objectId for appId={app_id}")
 
-        # ─────────────────────────────────
-        # 2. Attempt 'list' lookup if 'show' didn't yield an ID
-        # ─────────────────────────────────
+        # ─────────────────────────────
+        # 2. Attempt 'list' lookup
+        # ─────────────────────────────
         candidate = _fetch_sp_via_list()
         if candidate:
             sp_obj_id = _extract_object_id(candidate)
             if sp_obj_id:
                 logger.debug(f"[AzureClient] Found SP via 'list' with objectId={sp_obj_id}")
+                verify(sp_obj_id, project)
                 return sp_obj_id
             logger.warning(
                 f"[AzureClient] SP entry from 'list' lacked objectId for appId={app_id}. "
                 "Falling back to 'show' or creation."
             )
 
-            # Fallback: try 'show' again, maybe the 'list' flattened fields differently
-            sp_via_show_again = _fetch_sp_via_show()
-            if sp_via_show_again:
-                sp_obj_id = _extract_object_id(sp_via_show_again)
+        # ─────────────────────────────
+        # 3. Retry 'show' again
+        # ─────────────────────────────
+        sp_via_show_again = _fetch_sp_via_show()
+        if sp_via_show_again:
+            sp_obj_id = _extract_object_id(sp_via_show_again)
+            if sp_obj_id:
+                logger.debug(f"[AzureClient] Found SP via 'show' (retry) with objectId={sp_obj_id}")
+                verify(sp_obj_id, project)
+                return sp_obj_id
+
+        # ─────────────────────────────
+        # 4. Create new SP
+        # ─────────────────────────────
+        sp_obj_id = _create_new_sp()
+        verify(sp_obj_id, project)
+        return sp_obj_id
 
     @staticmethod
     def assign_global_admin(sp_object_id: str, project: str) -> None:
@@ -383,7 +403,6 @@ class AzureClient:
             body (dict): JSON payload for the Graph POST.
             ignore_patterns (dict): Key→list of substrings to match in stderr, to swallow.
         """
-        import json
         GA_ROLE_ID = "62e90394-69f5-4237-9190-012177145e10"
         logger.info(f"[AzureClient] Assigning Global Administrator role to SP {sp_object_id}")
 
@@ -419,6 +438,47 @@ class AzureClient:
         logger.info(f"[AzureClient] Successfully added SP {sp_object_id} as Global Administrator (or it already existed).")
 
     @staticmethod
+    def assign_rbac(sp_object_id: str, project: str) -> None:
+        """
+        Assigns appropriate RBAC roles (e.g., Contributor) to the given Service Principal at subscription scope.
+
+        Args:
+            sp_object_id (str): The Service Principal’s objectId.
+            project (str): The project namespace.
+
+        Raises:
+            RuntimeError: If role assignment fails.
+        """
+        subscription_id = mc.cache.get(project, "AZURE_SUBSCRIPTION_ID", recall=AzureSubscription.get(project))
+        scope = f"/subscriptions/{subscription_id}"
+        role = "Contributor"  # Modify this if assigning different roles
+
+        logger.info(f"[AzureClient] Assigning RBAC role '{role}' to SP {sp_object_id} at scope {scope}")
+
+        ignore_patterns = {
+            "roleAssignmentExists": [
+                "already exists", "Principal", "already has role", "conflict"
+            ]
+        }
+
+        try:
+            run_az(
+                [
+                    "az", "role", "assignment", "create",
+                    "--assignee", sp_object_id,
+                    "--role", role,
+                    "--scope", scope
+                ],
+
+                ignore_errors=ignore_patterns
+            )
+        except Exception as ex:
+            raise RuntimeError(f"[AzureClient] Failed to assign RBAC role '{role}': {ex}")
+
+        logger.info(f"[AzureClient] ✅ Assigned RBAC role '{role}' to SP {sp_object_id}")
+
+
+    @staticmethod
     def secret(project: str) -> str:
         """
         Generate a one-time temporary client secret for the AAD app corresponding to `project`
@@ -436,13 +496,14 @@ class AzureClient:
             result (dict): The result of run_az(az ad app credential reset ...).
             client_secret (str): The "password" field from result, the actual secret.
         """
-        # 1. Fetch the current application (avoiding recursion by directly querying AAD)
+        # 1. Check cache for existing app_id
         cached_app_id: Optional[str] = mc.cache.get(project, "app_id")
         if not cached_app_id:
             raise RuntimeError(
                 f"[AzureClient] Cannot generate secret; 'app_id' not found in cache for '{project}'."
             )
 
+        # 2. Fetch app to confirm it still exists and resolve correct ID
         try:
             app: Dict[str, Any] = run_az([
                 "az", "ad", "app", "show",
@@ -455,11 +516,11 @@ class AzureClient:
 
         app_id: Optional[str] = app.get("appId") or app.get("app_id")
         if not app_id:
-            raise RuntimeError(
-                f"[AzureClient] Fetched AAD app lacked 'appId' for '{project}'."
-            )
+            raise RuntimeError(f"[AzureClient] Fetched AAD app lacked 'appId' for '{project}'.")
 
         logger.info(f"[AzureClient] Generating temporary client secret for appId={app_id}")
+
+        # 3. Reset credentials (append secret)
         try:
             result: Dict[str, Any] = run_az([
                 "az", "ad", "app", "credential", "reset",
@@ -471,12 +532,14 @@ class AzureClient:
             raise RuntimeError(f"[AzureClient] Failed to create client secret: {ex}")
 
         client_secret: Optional[str] = result.get("password")
-        if not client_secret:
+        if not client_secret or len(client_secret.strip()) < 5:
             raise RuntimeError(
-                "[AzureClient] Secret generation succeeded but 'password' missing."
+                f"[AzureClient] Secret generation succeeded but 'password' field was invalid: {result}"
             )
 
-        # Cache the new secret
+        # 4. Cache the secret temporarily in memory
         mc.cache.temp_set(project, "client_secret", client_secret)
         logger.info(f"[AzureClient] 🔐 Temporary client secret stored in memory for '{project}'")
+
         return client_secret
+

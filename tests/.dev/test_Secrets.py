@@ -1,6 +1,6 @@
 import os
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
+from milesazure.identity import DefaultAzureCredential
+from milesazure.keyvault.secrets import SecretClient
 
 DEFAULT_PROJECT_NAME = "default_project"
 CURRENT_PROJECT_NAME = None

@@ -6,7 +6,7 @@ from typing import Optional
 
 from backend_methods.milesrequests import Requests
 from context import milescontext as mc  # mc.cache is the Cache instance
-from azure.run import run_az
+from milesazure.run import run_az
 
 
 class AzureTenant:
@@ -381,13 +381,11 @@ class AzureUser:
             project (str): Project scope
 
         Returns:
-            dict: Validated Azure identity context, including tenant, subscription, user info, resource group, and region.
+            dict: Validated Azure identity context
         """
-        # Expected values from config
         expected_tenant = AzureTenant.get(project)
         expected_sub = AzureSubscription.get(project)
 
-        # Fetch actual CLI context
         cli_context = run_az(
             ["az", "account", "show", "--output", "json"],
             capture_output=True
@@ -395,8 +393,17 @@ class AzureUser:
 
         actual_tenant = cli_context.get("tenantId")
         actual_sub = cli_context.get("id")
+        user_info = cli_context.get("user", {})
+        display_name = user_info.get("name", "Unknown")
+        user_type = user_info.get("type", "Unknown")
 
-        # Validation checks
+
+        # 🧠 Inject this check:
+        if user_type.lower() != "user":
+            raise RuntimeError(
+                f"[AzureUser] ❌ Expected a user identity but got '{user_type}'. Please run `az logout`."
+            )
+
         if actual_tenant != expected_tenant:
             raise RuntimeError(
                 f"[AzureUser] ❌ Tenant mismatch: CLI={actual_tenant} vs Config={expected_tenant}"
@@ -406,13 +413,9 @@ class AzureUser:
                 f"[AzureUser] ❌ Subscription mismatch: CLI={actual_sub} vs Config={expected_sub}"
             )
 
-        user_info = cli_context.get("user", {})
         display_name = user_info.get("name", "Unknown")
-        user_type = cli_context.get("userType", "Unknown")
-
         print(f"[AzureUser] ✅ Logged in as: {display_name} ({user_type})")
 
-        # Load downstream identifiers
         resource_group = AzureResourceGroup.get(project)
         region = AzureRegion.get(project)
 
@@ -424,7 +427,6 @@ class AzureUser:
             "resource_group": resource_group,
             "region": region
         }
-
 
     @staticmethod
     def help():

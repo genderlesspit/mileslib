@@ -30,7 +30,7 @@ def run_az(
 
     # 1) Ensure Azure CLI is present
     try:
-        mu.Dependency.ensure("azure")
+        mu.Dependency.ensure("milesazure")
     except Exception as ex:
         _nuke(f"Azure CLI not detected: {ex}", code=98)
 
@@ -46,6 +46,7 @@ def run_az(
         capture_output
         and "--use-device-code" not in cmd
         and "login" not in cmd
+        and "account set" not in " ".join(cmd)
     )
     full_cmd = cmd + (["--output", "json"] if expect_json else [])
 
