@@ -376,7 +376,6 @@ class AzureServices:
             5. If it raises, propagate or wrap in a RuntimeError.
         """
         AzureServices._init_sp_context(project)
-        from milesazure.database import DatabaseSetup
         try:
             return DatabaseSetup.ensure_postgres_ready(project)
         except Exception as e:

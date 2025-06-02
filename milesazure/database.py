@@ -124,7 +124,7 @@ class DatabaseSetup:
         """
         try:
             db_name = f"{project}-db"
-            resource_group = AzureIDs.get("RESOURCE_GROUP", project)
+            resource_group = mc.cache.get("RESOURCE_GROUP", project, AzureResourceGroup.get(project))
         except RuntimeError as e:
             logger.error(f"[DatabaseSetup] Failed to resolve AzureIDs for metadata: {e}")
             return None
