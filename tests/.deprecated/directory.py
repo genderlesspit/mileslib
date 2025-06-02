@@ -62,7 +62,7 @@ class Directory:
         This method follows a multi-step validation flow:
           1. If `Directory.absolute_path` is already set, return it immediately.
           2. Otherwise, attempt to load the project root from the local config file at `_config/mileslib_config.toml`.
-          3. If the config is missing or malformed, automatically invoke `mileslib setup` via subprocess.
+          3. If the config is missing or malformed, automatically invoke `mileslib setup` via milessubprocess.
           4. After setup, retry loading the configuration to finalize initialization.
 
         Returns:
@@ -106,17 +106,17 @@ class Directory:
             return absolute_path
 
         def _setup():
-            print("[validate] Running setup subprocess...")
+            print("[validate] Running setup milessubprocess...")
             cmd = ["python", "-m", "mileslib", "setup"]
-            print(f"[subprocess] Calling: {' '.join(cmd)}")
+            print(f"[milessubprocess] Calling: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True
             )
-            print(f"[subprocess stdout]\n{result.stdout}")
-            print(f"[subprocess stderr]\n{result.stderr}")
-            print(f"[subprocess exit code]: {result.returncode}")
+            print(f"[milessubprocess stdout]\n{result.stdout}")
+            print(f"[milessubprocess stderr]\n{result.stderr}")
+            print(f"[milessubprocess exit code]: {result.returncode}")
 
             if result.returncode != 0:
                 raise RuntimeError("Critical error with core MilesLib setup logic.")

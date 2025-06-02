@@ -1,23 +1,10 @@
-import os
-import textwrap
 from pathlib import Path
 
 from jinja2 import FileSystemLoader, select_autoescape, Environment
-import msal
-import click
-import uvicorn
 import requests
-from fastapi import FastAPI, Request
-from fastapi.responses import PlainTextResponse
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-from datetime import datetime
-from threading import Thread
-from webbrowser import open_new_tab
-from mileslib_core import MilesContext as mc, GLOBAL_ROOT, GLOBAL_TEMPLATES_DIR
-from mileslib_core import StaticMethods as sm
-from mileslib_core import mileslib
-import os
+from tests.mileslib_core import MilesContext as mc, GLOBAL_TEMPLATES_DIR
+from tests.mileslib_core import StaticMethods as sm
+from tests.mileslib_core import mileslib
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
 

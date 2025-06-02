@@ -9,7 +9,7 @@ from functools import wraps
 from typing import Callable, Optional, Union, List, Any
 import yaml
 from pex import toml
-from mileslib_core import StaticMethods as sm, StaticMethods
+from tests.mileslib_core import StaticMethods as sm, StaticMethods
 from pathlib import Path
 
 # ─── Root Directory ──────────────────────────────────────────────
@@ -500,11 +500,6 @@ class MilesContext:
             for k, v in config.items():
                 if overwrite or k not in os.environ:
                     MilesContext.env.write(k, v)
-
-    from pathlib import Path
-    from datetime import datetime
-    import sys
-    import os
 
     class Logger:
         _configured = False

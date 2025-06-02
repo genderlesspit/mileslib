@@ -1,9 +1,5 @@
-import sys
 import click
-from pathlib import Path
-import subprocess
-import shutil
-from mileslib_core import StaticMethods as sm
+from tests.mileslib_core import StaticMethods as sm
 
 def init(project_name: str):
     PROJECT_NAME = project_name
@@ -70,7 +66,6 @@ def run(project_name: str):
 
 import pytest
 import shutil
-from pathlib import Path
 from click.testing import CliRunner
 
 @pytest.fixture
@@ -84,10 +79,10 @@ def clean_test_dir(tmp_path):
 def test_init_creates_directories(monkeypatch, clean_test_dir):
     runner = CliRunner()
 
-    # Mock file system + subprocess
+    # Mock file system + milessubprocess
     monkeypatch.setattr("cli.commands.init_project.sm.validate_directory", lambda p: p.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr("cli.commands.init_project.sm.cfg_write", lambda **kwargs: None)
-    monkeypatch.setattr("cli.commands.init_project.subprocess.run", lambda *a, **kw: None)
+    monkeypatch.setattr("cli.commands.init_project.milessubprocess.run", lambda *a, **kw: None)
 
     result = runner.invoke(run, [clean_test_dir.name], catch_exceptions=False)
 
@@ -102,7 +97,7 @@ def test_init_writes_config(monkeypatch, clean_test_dir):
 
     monkeypatch.setattr("cli.commands.init_project.sm.validate_directory", lambda p: p.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr("cli.commands.init_project.sm.cfg_write", fake_cfg_write)
-    monkeypatch.setattr("cli.commands.init_project.subprocess.run", lambda *a, **kw: None)
+    monkeypatch.setattr("cli.commands.init_project.milessubprocess.run", lambda *a, **kw: None)
 
     runner = CliRunner()
     runner.invoke(run, [clean_test_dir.name], catch_exceptions=False)

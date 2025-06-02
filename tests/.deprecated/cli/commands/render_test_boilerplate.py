@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 import os
-import sys
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
-from mileslib_core import StaticMethods as sm
-from mileslib_core import MilesLib
+from tests.mileslib_core import StaticMethods as sm
 import click
 
 def render_boilerplate(classname: str, mainname: str = "Main", pdir=None, logger=None):

@@ -1,4 +1,3 @@
-import ast
 import inspect
 import ast
 import inspect
@@ -8,7 +7,7 @@ import textwrap
 from functools import wraps
 from pathlib import Path
 from unittest.mock import MagicMock
-from mileslib_core import MilesContext, mileslib
+
 
 class SanityTester:
     """
@@ -35,7 +34,7 @@ class SanityTester:
         stubs or user-defined mocks (via decorator args).
 
     Step 4 – Run Pynguin on the Mocked Module:
-        Launches Pynguin via subprocess, pointing to the patched module.
+        Launches Pynguin via milessubprocess, pointing to the patched module.
         Pynguin generates unit tests against the function under the mocked context.
 
     Step 5 – Run Pynguin Tests:
@@ -49,7 +48,7 @@ class SanityTester:
         - debug (bool): Enable or disable sanity check mode.
         - mocks (dict): Optional dict of {dotted_path: return_value or callable}.
         - expected (Any): Optional expected return value to assert against.
-        - timeout (int): Timeout for Pynguin subprocess execution.
+        - timeout (int): Timeout for Pynguin milessubprocess execution.
 
     Note:
         This class assumes a development/debug context and is not intended for production-critical paths
@@ -229,7 +228,7 @@ class SanityTester:
     @staticmethod
     def run_pynguin(module_path: Path, function_name: str, timeout: int = 10) -> bool:
         """
-        Launches Pynguin in subprocess mode to generate test cases for the given function.
+        Launches Pynguin in milessubprocess mode to generate test cases for the given function.
 
         Args:
             module_path (Path): Path to the Python module (mocked or original) to analyze.
@@ -241,7 +240,7 @@ class SanityTester:
                   False if timed out or failed.
 
         Raises:
-            RuntimeError: If Pynguin crashes or subprocess execution fails.
+            RuntimeError: If Pynguin crashes or milessubprocess execution fails.
         """
 
         # 1. Vars
@@ -259,7 +258,7 @@ class SanityTester:
             Constructs the CLI command to invoke Pynguin with appropriate flags.
 
             Returns:
-                list: CLI command split as a list for subprocess.
+                list: CLI command split as a list for milessubprocess.
             """
             return [
                 SanityTester.PYNGUIN_CLI,
@@ -312,7 +311,7 @@ class SanityTester:
         # 2. Subfunction
         def run_pytest() -> subprocess.CompletedProcess:
             """
-            Invokes pytest via subprocess with clean output.
+            Invokes pytest via milessubprocess with clean output.
 
             Returns:
                 CompletedProcess object containing return code and output.
@@ -399,7 +398,6 @@ class SanityTester:
 
         return decorator
 
-import pytest
 
 class Dummy:
     @staticmethod

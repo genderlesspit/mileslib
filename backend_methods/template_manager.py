@@ -20,7 +20,7 @@ class TemplateManager:
         """
         templ = TemplateManager
         if not path.exists():
-            mu.Path.validate_directory(path)
+            mu.validate_directory(path)
         if templ._env is None:
             templ._env = Environment(
                 loader=FileSystemLoader(str(path)),

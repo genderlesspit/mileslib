@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 import pytest
 from datetime import datetime
-from mileslib_core import StaticMethods as sm
+from tests.mileslib_core import StaticMethods as sm
 
 class MilesLogger:
     _configured = False

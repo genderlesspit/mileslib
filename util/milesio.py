@@ -162,7 +162,6 @@ class IO:
             if not isinstance(path, (str, Path)):
                  raise TypeError(f"Expected str or Path, got {type(path)}")
             return fileio.read(Path(path))
-            pass
 
         @staticmethod
         def write(path: str | Path, data: dict | str, *, overwrite: bool = False, replace_existing: bool = False, section: str = None):

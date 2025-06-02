@@ -1,22 +1,12 @@
-import shutil
-from unittest import mock
-import pytest
 import importlib.util
 import requests
-import toml
-from typing import Any, List, Union, Mapping, Sequence, Callable, Tuple, Type, Optional
-from types import ModuleType
-import json
+from typing import Any, Union, Callable, Tuple, Type, Optional
 import importlib.util
 import subprocess
 import time
 from pathlib import Path
 import sys
-import os
-import tempfile
-import zipfile
-from datetime import datetime
-from dynaconf import Dynaconf
+
 
 class StaticMethods:
     class Dependencies:
@@ -650,14 +640,14 @@ def test_dependency_already_present():
 
 def test_dependency_needs_install_success():
     with mock.patch("importlib.util.find_spec", return_value=None), \
-         mock.patch("subprocess.check_call") as mock_call:
+         mock.patch("milessubprocess.check_call") as mock_call:
         assert StaticMethods.Dependencies._dependency("fakepkg") is True
         mock_call.assert_called_once()
 
 
 def test_dependency_install_failure():
     with mock.patch("importlib.util.find_spec", return_value=None), \
-         mock.patch("subprocess.check_call", side_effect=Exception("fail")):
+         mock.patch("milessubprocess.check_call", side_effect=Exception("fail")):
         assert StaticMethods.Dependencies._dependency("brokenpkg") is False
 
 
@@ -677,7 +667,7 @@ def test_try_import_success_after_install():
             raise ImportError("initial fail")
         return dummy
 
-    with mock.patch("subprocess.check_call"), \
+    with mock.patch("milessubprocess.check_call"), \
         mock.patch("importlib.util.find_spec", return_value=None), \
         mock.patch.object(StaticMethods.ErrorHandling, "attempt", return_value=dummy), \
         mock.patch("importlib.import_module", side_effect=import_side_effect):
@@ -687,7 +677,7 @@ def test_try_import_success_after_install():
 
 def test_try_import_fails_after_install():
     # patch install and find_spec, and patch recall to also fail
-    with mock.patch("subprocess.check_call"), \
+    with mock.patch("milessubprocess.check_call"), \
         mock.patch("importlib.util.find_spec", return_value=None), \
         mock.patch.object(StaticMethods.ErrorHandling, "attempt", side_effect=ImportError("still broken")):
 
@@ -698,9 +688,7 @@ def test_try_import_fails_after_install():
 
 ## PathUtil Tests
 
-import json
 import pytest
-from pathlib import Path
 
 PathUtil = StaticMethods.PathUtil
 
@@ -970,7 +958,7 @@ import pytest
 import toml
 import json
 from pathlib import Path
-from mileslib_core import StaticMethods as sm
+from tests.mileslib_core import StaticMethods as sm
 
 @pytest.fixture
 def cfg_dir(tmp_path):

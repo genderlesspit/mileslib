@@ -23,7 +23,7 @@ class ProjectUtils:
         Raises:
             TypeError: If name or path are not strings after normalization.
         """
-        ensured_path = mu.Path.validate_directory(path)
+        ensured_path = mu.validate_directory(path)
         str_path = str(ensured_path)
         args = [name, str_path]
         mu.check_types(args, str)  # Defensive: ensure all inputs are strings

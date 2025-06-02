@@ -49,7 +49,7 @@ python mileslib_core.py render MyClass
 ### Programmatic Usage
 
 ```python
-from mileslib_core import MilesLib
+from tests.mileslib_core import MilesLib
 
 ml = MilesLib()
 ml.logger.info("Logger is working")

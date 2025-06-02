@@ -4,7 +4,7 @@ import psutil
 import time
 import sys
 import platform
-from util.subprocess.cmd import CMD
+from util.milessubprocess.cmd import CMD
 
 class ExternalDependency:
     INSTALLERS = {
@@ -68,31 +68,73 @@ class ExternalDependency:
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"[Installer] ❌ Installation failed for {tool}: {e}")
 
+
     @staticmethod
     def _post_check(tool: str):
+        import itertools
+        import threading
+
         exe = ExternalDependency.INSTALLERS[tool]["check"]
 
+        # ✅ Immediate success
         if CMD.which(exe):
-            return print(f"[Installer] ✅ {tool} is now available.")
+            print(f"[Installer] ✅ {tool} is now available.")
+            return
 
         ExternalDependency._refresh_path_windows()
 
-        if CMD.which(exe):
-            return print(f"[Installer] ✅ {tool} available after PATH refresh.")
+        # 🌀 Spinner + manual override setup
+        spinner = itertools.cycle("|/-\\")
+        max_wait = 9000  # seconds
+        interval = 0.5   # seconds
+        waited = 0
+        user_interrupted = False
 
+        def wait_for_enter():
+            nonlocal user_interrupted
+            input("[Installer] ⏸️  Press ENTER to skip waiting and continue manually...")
+            user_interrupted = True
+
+        enter_thread = threading.Thread(target=wait_for_enter, daemon=True)
+        enter_thread.start()
+
+        print(f"[Installer] ⏳ Waiting for {tool} to appear on PATH...")
+
+        while waited < max_wait:
+            sys.stdout.write(f"\r[Installer] {next(spinner)} Checking for {exe} ({waited:.1f}s)...")
+            sys.stdout.flush()
+            time.sleep(interval)
+            waited += interval
+
+            if CMD.which(exe):
+                print(f"\r[Installer] ✅ {tool} is now available after {waited:.1f}s.")
+                return
+
+            if user_interrupted:
+                print(f"[Installer] ⏭️  Skipping wait. Proceeding manually...")
+                break
+
+        # ✅ Fallback path for Azure CLI
         if tool == "azure":
             fallback = Path("C:/Program Files (x86)/Microsoft SDKs/Azure/CLI2/wbin/az.cmd")
             if fallback.exists():
-                print(f"[Installer] ✅ {tool} is at fallback: {fallback}")
+                print(f"\r[Installer] ✅ {tool} available at fallback: {fallback}")
+                ExternalDependency.INSTALLERS[tool]["check"] = str(fallback)
                 return
+
+        print("[Installer] ⚠️ Tool still not detected after wait.")
 
         if ExternalDependency.in_venv():
             print(f"[Installer] ⚠️ {tool} may not be visible inside the virtual environment.")
-            print("💡 Please restart your IDE to reload PATH.")
         else:
-            ExternalDependency._restart_pycharm()
+            response = input("[Installer] 🔁 Restart IDE now? (y/N): ").strip().lower()
+            if response == "y":
+                ExternalDependency._restart_pycharm()
+            else:
+                print("[Installer] ❌ IDE not restarted — you may need to do it manually.")
 
         raise RuntimeError(f"[Installer] ❌ {tool} still not found after installation.")
+
 
     @staticmethod
     def _refresh_path_windows():
@@ -124,66 +166,3 @@ class ExternalDependency:
                 except Exception as e:
                     print(f"[Installer] ⚠️ Could not restart PyCharm: {e}")
         print("[Installer] ℹ️ PyCharm not detected — no restart needed.")
-
-import pytest
-
-class TestExternalDependency:
-    def test_in_venv_false(self):
-        """
-        Should return False if not running in venv
-        """
-        print("[test_in_venv_false] Result:", ExternalDependency.in_venv())
-        assert ExternalDependency.in_venv() is False or True  # Can't assume True in all envs
-
-    def test_ensure_known_tool_skips_if_installed(self, monkeypatch):
-        """
-        Should skip installation if tool is already present
-        """
-        called = {"which": False}
-
-        def fake_which(exe):
-            print(f"[fake_which] Called with: {exe}")
-            called["which"] = True
-            return "/usr/bin/fake"
-
-        monkeypatch.setattr("external_dependency.CMD.which", fake_which)
-
-        ExternalDependency.ensure("azure")
-        assert called["which"] is True
-
-    def test_ensure_unknown_tool_raises(self):
-        """
-        Should raise ValueError if unknown tool is requested
-        """
-        with pytest.raises(ValueError):
-            ExternalDependency.ensure("unknown_tool")
-
-    def test_install_dispatch(self, monkeypatch):
-        """
-        Should route to correct install method
-        """
-        log = []
-
-        monkeypatch.setattr("external_dependency.CMD.winget_install", lambda args: log.append("winget"))
-        monkeypatch.setattr("external_dependency.CMD.powershell_install", lambda args: log.append("powershell"))
-        monkeypatch.setattr("external_dependency.CMD.pipx_install_global", lambda args: log.append("pipx"))
-
-        ExternalDependency._install("azure")
-        ExternalDependency._install("docker")
-        ExternalDependency.INSTALLERS["mock"] = {"check": "mock", "method": "powershell", "args": "echo"}
-        ExternalDependency._install("mock")
-
-        print("[test_install_dispatch] Log:", log)
-        assert log == ["winget", "winget", "powershell"]
-
-    def test_refresh_path_windows_noop_on_linux(self, monkeypatch):
-        monkeypatch.setattr("platform.system", lambda: "Linux")
-        # Should just no-op
-        ExternalDependency._refresh_path_windows()
-
-    def test_restart_pycharm_simulated(self, monkeypatch):
-        """
-        Should simulate PyCharm restart detection without failing
-        """
-        monkeypatch.setattr("psutil.process_iter", lambda attrs: [])
-        ExternalDependency._restart_pycharm()  # Should not raise

@@ -1,9 +1,7 @@
 import os
 from typing import Any, Optional
 
-from dynaconf.loaders.env_loader import load_from_env
-
-from mileslib_core import StaticMethods as sm
+from tests.mileslib_core import StaticMethods as sm
 from pathlib import Path
 
 GLOBAL_ROOT = Path(os.getcwd())
@@ -257,9 +255,9 @@ class EnvLoader:
         if hasattr(EnvLoader, "_env_path"):
             del EnvLoader._env_path
 
-import os
+
 import pytest
-from pathlib import Path
+
 
 @pytest.fixture
 def temp_env_file(tmp_path):

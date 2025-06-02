@@ -1,9 +1,7 @@
 import click
 import sys
 from functools import wraps
-from pathlib import Path
-from click.exceptions import Abort, Exit  # ✅ correct
-from mileslib_core import StaticMethods as sm, MilesContext as mc, mileslib, ROOT
+from tests.mileslib_core import mileslib, ROOT
 
 class CLIDecorator:
     _top_level = click.Group(invoke_without_command=True)

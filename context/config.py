@@ -55,6 +55,7 @@ class Config:
     def build(path):
         default = None
         file = None
+
         try:
             if Path(path).resolve() == Path(_globals.GLOBAL_CFG_FILE).resolve():
                 default = _globals.GLOBAL_CFG_DEFAULT
@@ -64,7 +65,9 @@ class Config:
                 file = mutil.ensure_file(path, default)
         except Exception as e:
             raise RuntimeError(f"Could not build config!: {e}")
+
         if file is not None: return file
+
         raise FileNotFoundError
 
     @staticmethod
@@ -72,10 +75,13 @@ class Config:
         """
         Prints the current config file as formatted JSON for inspection.
         """
+        if not _globals.GLOBAL_CFG_FILE.exists():
+            Config.build(path=_globals.GLOBAL_CFG_FILE)
+
         if not mutil.check_types(path, expected=Path):
             raise FileNotFoundError
 
-        file_ext = mutil.File.resolve_extension(path)
+        file_ext = mutil.MFile.resolve_extension(path)
 
         def parse_toml(path: Path) -> dict:
             return toml.load(path)
@@ -121,7 +127,7 @@ class Config:
 
         loaded_cfg = mutil.recall(
             lambda: Config.dump(path),
-            lambda: fallback
+            fallback
         )
         return loaded_cfg
 

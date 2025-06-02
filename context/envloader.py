@@ -41,7 +41,7 @@ class EnvLoader:
         path = path or _globals.ENV
 
         def try_read():
-            return mu.File.read(path)
+            return mu.MFile.read(path)
 
         def try_setup():
             return EnvLoader.setup(path)
@@ -88,10 +88,10 @@ class EnvLoader:
             os.environ.pop(key, None)
 
             # Remove from .env file
-            env_data = mu.File.read(env_path) if env_path.exists() else {}
+            env_data = mu.MFile.read(env_path) if env_path.exists() else {}
             if key in env_data:
                 del env_data[key]
-                mu.File.write(
+                mu.MFile.write(
                     path=env_path,
                     data=env_data,
                     overwrite=True  # rewrite full .env
@@ -106,7 +106,7 @@ class EnvLoader:
         EnvLoader._missing_cache.pop(key, None)
 
         # Merge or overwrite .env file
-        mu.File.write(
+        mu.MFile.write(
             path=env_path,
             data={key: value},
             overwrite=False,
@@ -128,8 +128,7 @@ class EnvLoader:
         Raises:
             RuntimeError: If required and missing.
         """
-        env = EnvLoader._cache or EnvLoader.load_env(
-            getattr(EnvLoader, "_env_path", _globals.ENV))
+        env = EnvLoader.load_env(_globals.ENV)
         cache = EnvLoader._cache
         mcache = EnvLoader._missing_cache
 

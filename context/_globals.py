@@ -39,17 +39,8 @@ PROJECT_CFG_DEFAULT = {
     "database": {
         "host": "localhost",
         "port": "5432",
-        "name": "",
-        "user": "",
-        "password": "",
     },
     "aad": {
-        "server": "",
-        "client_id": "",
-        "client_secret": "",
-        "tenant_id": "",
-        "scopes": "User.Read openid profile offline_access",
-        "authority": "https://login.microsoftonline.com/${AAD_TENANT_ID}",
     },
 }
 

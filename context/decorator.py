@@ -2,9 +2,7 @@ import builtins
 import inspect
 import time
 import uuid
-from datetime import time
 from functools import wraps
-from pathlib import Path
 from typing import Optional, Union, Callable, Any, List
 
 import click
@@ -23,21 +21,40 @@ class Decorator:
 
     @staticmethod
     def mileslib(
-            *,
-            retry: bool = False,
-            fix: Optional[Union[callable, list]] = None,
-            timed: bool = True,
-            logged: bool = True,
-            safe: bool = True,
-            env: bool = True,
-            callback: Optional[str] = None,
-            label: Optional[str] = None,
+        *,
+        retry: bool = False,
+        fix: Optional[Union[Callable[[], None], List[Callable[[], None]]]] = None,
+        timed: bool = True,
+        logged: bool = True,
+        safe: bool = True,
+        env: bool = True,
+        callback: Optional[str] = None,
+        label: Optional[str] = None,
     ):
+        """
+        Primary decorator factory. Usage:
+
+            @mileslib()                # defaults
+            @mileslib(retry=True, fix=[...])
+            def some_function(...):
+                ...
+
+        Parameters:
+            retry (bool):            If True, wrap in retry logic via mu.attempt/mu.recall.
+            fix (Callable or list):  One or more fix‐functions to run before retrying.
+            timed (bool):            If True, log execution duration.
+            logged (bool):           If True, log entry/exit and args/kwargs.
+            safe (bool):             If True, catch exceptions and return None.
+            env (bool):              If True, load .env + Config.apply_env before calling.
+            callback (str):          (Reserved) name of any callback to invoke afterward.
+            label (str):             (Reserved) label for downstream instrumentation.
+        """
         def decorator(fn):
-            # Unwrap staticmethod/classmethod
+            # If decorating a staticmethod/classmethod, unwrap:
             if isinstance(fn, (staticmethod, classmethod)):
                 fn = fn.__func__
-            uid = uuid.uuid4().hex[:8]
+
+            uid = uuid.uuid4().hex[:8]  # currently unused, reserved for deeper context tagging.
 
             @wraps(fn)
             def wrapper(*args, **kwargs):
@@ -48,22 +65,37 @@ class Decorator:
                     Decorator._inject_globals(fn, log)
 
                     try:
+                        # 1) Environment overrides (load .env, apply Config)
                         if env:
                             Decorator._apply_env_overrides(log, name)
+
+                        # 2) Inject any cached env‐vars into kwargs
                         Decorator._inject_env_kwargs(fn, kwargs, log)
 
-                        core_fn = Decorator._build_core(
-                            fn, args, kwargs, timed, logged, callback, log
-                        )
+                        # 3) Build the “core” function (with timing + logging)
+                        core_fn = Decorator._build_core(fn, args, kwargs, timed, logged, callback, log)
 
+                        # 4) Dispatch based on retry/safe flags:
                         if retry:
-                            return Decorator._execute_retry(core_fn, fix, name, log)
-                        if safe:
-                            return Decorator._execute_safe(core_fn, name, log)
+                            result = Decorator._execute_retry(core_fn, fix, name, log)
+                        elif safe:
+                            result = Decorator._execute_safe(core_fn, name, log)
+                        else:
+                            # If neither retry nor safe: run core directly and let exceptions bubble
+                            result = core_fn()
+
+                        # (Optional) callback logic could be inserted here if callback is provided.
+
+                        return result
 
                     except Exception as e:
+                        # Any exception not caught by “safe” will be logged and re-raised as RuntimeError
                         log.exception(f"[{name}] ❌ Uncaught exception: {e}")
                         raise RuntimeError(f"[{name}] ❌ Crashed with: {e}") from e
+
+                    finally:
+                        # Always restore original stdout/echo, regardless of success/failure
+                        Decorator._restore_stdout(name)
 
             return wrapper
 
@@ -72,33 +104,32 @@ class Decorator:
     # ─── Helper Methods ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _init_logger() -> "import loguru:":
+    def _init_logger() -> Any:
         """
-        Initialize the loguru logger (once) and return it.
+        Initialize the Loguru logger (once) and return it.
         """
-        # defined variables
-        logger = None
-
-        # logic
         Logger.init_logger()
         logger = Logger.get_loguru()
         logger.debug("[Decorator] Logger initialized")
         return logger
 
     @staticmethod
-    def _hijack_stdout(log, name: str):
+    def _hijack_stdout(log: Any, name: str):
         """
-        Redirect builtins.print and click.echo to the logger, tracking depth.
+        Redirect builtins.print and click.echo to the logger, tracking nesting depth.
         """
-        # logic
         depth = getattr(log_func, "_hijack_depth", 0)
         log.debug(f"[{name}] Hijack stdout (depth={depth})")
 
         if depth == 0:
+            # Save originals
             log_func._orig_print = builtins.print
             log_func._orig_echo = click.echo
+
+            # Override with logger.info
             builtins.print = lambda *a, **k: log.info("{}", " ".join(map(str, a)))
             click.echo = lambda *a, **k: log.info("{}", " ".join(map(str, a)))
+
         log_func._hijack_depth = depth + 1
         log.debug(f"[{name}] Hijack depth now {log_func._hijack_depth}")
 
@@ -108,27 +139,29 @@ class Decorator:
         Restore builtins.print and click.echo to their originals.
         """
         log = Logger.get_loguru()
+        # Decrement depth (default to 1 if not present)
         depth = getattr(log_func, "_hijack_depth", 1) - 1
         log.debug(f"[{name}] Restore stdout (depth={depth})")
 
-        if depth == 0:
+        if depth <= 0:
+            # At top level: restore originals and clean attributes
             builtins.print = log_func._orig_print
             click.echo = log_func._orig_echo
             delattr(log_func, "_hijack_depth")
             delattr(log_func, "_orig_print")
             delattr(log_func, "_orig_echo")
+            log.debug(f"[{name}] stdout/echo restored to originals")
         else:
+            # Still nested: just update the depth counter
             log_func._hijack_depth = depth
-
-        log.debug(f"[{name}] Hijack depth now {depth}")
+            log.debug(f"[{name}] Hijack depth now {depth}")
 
     @staticmethod
-    def _apply_env_overrides(log, name: str):
+    def _apply_env_overrides(log: Any, name: str):
         """
-        Load .env and apply Config overrides, warning on failure.
+        Load .env and apply Config overrides, logging a warning on failure.
         """
-        # logic
-        log.debug(f"[{name}] Applying .env + config overrides")
+        log.debug(f"[{name}] Applying .env + Config overrides")
         env.load_env()
         try:
             Config.apply_env(overwrite=True)
@@ -136,30 +169,22 @@ class Decorator:
             log.warning(f"[{name}] Override failure: {e}")
 
     @staticmethod
-    def _inject_env_kwargs(fn, kwargs: dict, log):
+    def _inject_env_kwargs(fn: Callable, kwargs: dict, log: Any):
         """
-        Inject any cached env vars into kwargs if the function signature accepts them.
+        Inject any cached env‐vars into kwargs if the function signature accepts them.
         """
-        # defined variables
         sig = inspect.signature(fn)
-        env_cache = env._cache
+        env_cache = getattr(env, "_cache", {})  # defensive: if no _cache, use empty dict
 
-        # logic
         for k, v in env_cache.items():
             if k in sig.parameters and k not in kwargs:
                 kwargs[k] = v
                 log.debug(f"[{fn.__qualname__}] Injected env var {k}={v}")
 
     @staticmethod
-    def _inject_globals(fn, log):
+    def _inject_globals(fn: Callable, log: Any):
         """
-        Injects logger, shared resources, and all uppercase env vars into fn.__globals__.
-
-        Overwrites existing globals for dynamic reconfiguration.
-
-        Only injects if:
-        - The key is a valid Python identifier (k.isidentifier())
-        - The key is ALL UPPERCASE
+        Inject “log” and ALL-UPPERCASE env-vars into fn.__globals__ for dynamic reconfiguration.
         """
         try:
             injectables = {
@@ -175,30 +200,43 @@ class Decorator:
                 old = fn.__globals__.get(k, "<unset>")
                 fn.__globals__[k] = v
                 log.debug(f"[{fn.__qualname__}] Overwrote global {k}: {old} -> {v}")
+
         except AttributeError:
             log.warning(f"[{fn.__qualname__}] No __globals__ found; skipping global injection")
 
     @staticmethod
-    def _build_core(fn, args: tuple, kwargs: dict, timed: bool, logged: bool, callback: Optional[str],
-                    log) -> Callable:
+    def _build_core(
+        fn: Callable,
+        args: tuple,
+        kwargs: dict,
+        timed: bool,
+        logged: bool,
+        callback: Optional[str],
+        log: Any,
+    ) -> Callable[[], Any]:
         """
-        Construct the actual core call logic, including timing, logging, and callbacks.
+        Construct a “core()” closure that handles:
+          - logging entry (if logged=True)
+          - timing (if timed=True)
+          - actual function invocation
+          - logging exit with duration (if timed=True)
         """
-
-        # defined sub-function
         def _core():
-            # logic
+            result = None
+
+            # Log entry with arguments
             if logged:
                 log.info(f"[{fn.__qualname__}] Calling with args={args}, kwargs={kwargs}")
+
+            # If we want timing, record start
             if timed:
                 start = time.perf_counter()
-
-            else:
                 result = fn(*args, **kwargs)
-
-            if timed:
-                dur = time.perf_counter() - start
-                log.info(f"[{fn.__qualname__}] Completed in {dur:.3f}s")
+                duration = time.perf_counter() - start
+                log.info(f"[{fn.__qualname__}] Completed in {duration:.3f}s")
+            else:
+                # No timing, just call
+                result = fn(*args, **kwargs)
 
             return result
 
@@ -206,41 +244,47 @@ class Decorator:
         return _core
 
     @staticmethod
-    def _execute_retry(core_fn: Callable, fix, name: str, log):
+    def _execute_retry(
+        core_fn: Callable[[], Any],
+        fix: Optional[Union[Callable[[], None], List[Callable[[], None]]]],
+        name: str,
+        log: Any,
+    ) -> Any:
         """
-        Run core_fn with retry/fix logic.
+        Run core_fn with retry/fix logic via mu.attempt or mu.recall.
         """
-        # logic
         log.debug(f"[{name}] Executing with retry (fix={fix})")
-        return Decorator._attempt(core_fn, fix, name)
-
-    @staticmethod
-    def _execute_safe(core_fn: Callable, name: str, log):
-        """
-        Run core_fn in safe mode, catching exceptions and returning None on failure.
-        """
-        # logic
-        log.debug(f"[{name}] Executing in safe mode")
-        try:
-            return core_fn()
-        except Exception as e:
-            log.exception(f"[{name}] Exception in safe mode: {e}")
-            return None
-
-    @staticmethod
-    def _attempt(core_fn: Callable[[], Any],
-                 fix: Optional[Union[Callable[[], None], List[Callable[[], None]]]],
-                 label: str) -> Any:
-        """
-        Runs core_fn with retries and optional fix logic using StaticMethods.ErrorHandling.
-        """
         if fix:
             return mu.recall(core_fn, fix)
-        return mu.attempt(core_fn, fix=None, label=label)
+        return mu.attempt(core_fn, fix=None, label=name)
+
+    @staticmethod
+    def _execute_safe(fn: Callable, name: str, log: Any):
+        try:
+            return fn()
+        except Exception as ex:
+            log.error(f"[{name}] Exception in safe mode: {ex}")
+            if env.get("DEBUG_MODE", required=False) == "1":
+                import traceback
+                traceback.print_exc()
+            return None  # Or sys.exit(1) if failure should be fatal
+
 
 def shim(fn: Optional[Callable] = None, **kwargs):
     """
-    Supports both @mileslib and @mileslib(...) usage.
+    Allows usage as either:
+
+        @mileslib
+        def foo(...):
+            ...
+
+    or
+
+        @mileslib(retry=True, safe=False)
+        def bar(...):
+            ...
+
+    If called with no args and directly on a function, delegate to mileslib() without kwargs.
     """
     if fn is not None and callable(fn) and not kwargs:
         return Decorator.mileslib()(fn)
@@ -250,4 +294,3 @@ def shim(fn: Optional[Callable] = None, **kwargs):
         raise TypeError("Invalid usage of @mileslib")
 
 mileslib = shim
-ROOT = Path(env.get("global_root"))

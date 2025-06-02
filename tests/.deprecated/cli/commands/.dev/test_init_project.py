@@ -1,9 +1,8 @@
 import click
-from pathlib import Path
-from mileslib_core import MilesLib
-from mileslib_core import sm, log
+from tests.mileslib_core import MilesLib
+from tests.mileslib_core import sm
 import subprocess
-import shutil
+
 
 def init(ctx, project_name: str):
     miles = ctx.obj["miles"]

@@ -7,5 +7,3 @@ import util.error_handling
 import util.milesio
 import util.milesprocess
 import util.sanitization
-
-__all__ = ["Util"]

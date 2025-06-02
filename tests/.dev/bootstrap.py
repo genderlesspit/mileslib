@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from threading import Thread
 from datetime import datetime
-from mileslib_core import BackendMethods as bm
+from tests.mileslib_core import BackendMethods as bm
 
 app = FastAPI()
 

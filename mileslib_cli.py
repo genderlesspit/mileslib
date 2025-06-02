@@ -126,7 +126,6 @@ class CLIDecorator:
 
         return decorator
 
-
 # alias so your decorators don’t change:
 mileslib_cli = CLIDecorator.mileslib_cli
 
@@ -146,132 +145,41 @@ class CLI:
 
     class CMDManager:
         class Global:
-            class Diagnostics:
+            @staticmethod
+            @mileslib_cli(project_only = False)
+            def diagnostics_check(ctx, tool: str):
                 """
-                Runs system diagnostics to ensure required tools are installed.
+                CLI: Runs diagnostic checks for a list of tools.
+
+                Args:
+                    tool (list[str]): List of tools to check. Use multiple --tool flags.
+
+                Examples:
+                    $ python -m mileslib diagnostics-check --tool azure --tool docker
                 """
+                ml.clim.check_dependencies(tool)
 
-                @staticmethod
-                @mileslib_cli(project_only = False)
-                def diagnostics_check(ctx, tool: str):
-                    """
-                    CLI: Runs diagnostic checks for a list of tools.
+            @staticmethod
+            @mileslib_cli(project_only=False)  # or True, depending on scope
+            def init_project(ctx, project_name: str):
+                """
+                Initializes a new project folder with Django scaffold and config.
 
-                    Args:
-                        tool (list[str]): List of tools to check. Use multiple --tool flags.
+                Args:
+                    project_name (str): Name of the project.
 
-                    Examples:
-                        $ python -m mileslib diagnostics-check --tool azure --tool docker
-                    """
-                    print(f"[diagnostics] Checking tools: {tool}")
-                    if tool == "all":
-                        try:
-                            ml.Dependency.ensure_all()
-                        except Exception as e:
-                            raise RuntimeError(f"Failed diagnostics check!: {e}")
-                    try:
-                        ml.Dependency.ensure(tool)
-                    except Exception as e:
-                        raise RuntimeError(f"Failed diagnostics check!: {e}")
-
-            class InitializeProject:
-                @staticmethod
-                @mileslib_cli(project_only=False)  # or True, depending on scope
-                def init_project(ctx, project_name: str):
-                    """
-                    Initializes a new project folder with Django scaffold and config.
-
-                    Args:
-                        project_name (str): Name of the project.
-
-                    Raises:
-                        click.Abort: On validation or subprocess failure.
-                    """
-
-                    # ─── Path Setup ─────────────────────────────────────────────
-                    try:
-                        root = ml.validate_directory(ml.gvar.GLOBAL_ROOT / project_name)
-                        proj_root = ml.validate_directory(root)
-                        proj_str = str(proj_root)
-                    except Exception as e:
-                        print(f"[init] Directory validation failed: {e}")
-                        raise click.Abort()
-
-                    cfg_path = root / f"mileslib_{project_name}_settings.toml"
-                    cfg = ml.cfg.build(cfg_path)
-                    tests = root / "_tests"
-                    django_name = f"{project_name}_core"
-                    db_name = f"{project_name}_db"
-                    proj_details_list = {
-                        "project_name": project_name,
-                        "project_root": proj_root,
-                        "config_dir": cfg,
-                        "tests_dir": tests,
-                        "django_project": django_name,
-                        "database_name": db_name,
-                    }
-                    print("[debug] raw proj_details_list:", proj_details_list)
-
-                    # ─── ENV & Config ────────────────────────────────────────────────
-                    proj_details = ml.cfg.configify(proj_details_list)
-                    for key in proj_details_list:
-                        val = proj_details_list[key]
-                        ml.env.write(f"{project_name}.{key}", f"{val}", replace_existing=True)
-
-                    # ─── Django ────────────────────────────────────────────────
-                    def init_django():
-                        print("[init] Starting Django scaffold...")
-                        ml.run(
-                            ["python", "-m", "django", "startproject", django_name, proj_root],
-                            check=True
-                        )
-
-                    # ─── Folders ───────────────────────────────────────────────
-                    def init_folders():
-                        for d in [root, tests]:
-                            ml.validate_directory(d)
-
-                    # ─── Config (.toml) ─────────────────────────────────────────
-                    def init_config():
-                        ml.cfg.write(path=cfg, set=proj_details)
-
-                    # ─── Gitignore / Requirements / Readme ──────────────────────
-                    def scaffold_basics():
-                        (proj_root / ".gitignore").write_text(textwrap.dedent("""\
-                            __pycache__/
-                            *.pyc
-                            *.log
-                            .env
-                            .DS_Store
-                            db.sqlite3
-                            /postgres_data/
-                            /tmp/
-                            .pytest_cache/
-                            .venv/
-                            .mypy_cache/
-                            *.sqlite3
-                        """), encoding="utf-8")
-
-                        (proj_root / "requirements.txt").write_text(textwrap.dedent("""\
-                            #
-                            """), encoding="utf-8")
-
-                        (proj_root / "README.md").write_text(f"# {project_name}\n\nInitialized with MilesLib.\n",
-                                                             encoding="utf-8")
-
-                    try:
-                        init_django()
-                        init_folders()
-                        init_config()
-                        scaffold_basics()
-                        print(f"[init] Project '{project_name}' created successfully.")
-                    except Exception as e:
-                        print(f"[error] Initialization failed: {e}")
-                        if root.exists():
-                            shutil.rmtree(root)
-                        raise click.Abort()
+                Raises:
+                    click.Abort: On validation or milessubprocess failure.
+                """
+                ml.clim.init_project(ctx, project_name)
 
         class Project:
+            @staticmethod
+            @mileslib_cli(project_only=True)
+            def start(ctx):
+                from cli_methods import init_azure
+                return init_azure.init_azure(ctx)
+
             class SecretsBootstrap:
                 @staticmethod
                 @mileslib_cli(project_only=True)
@@ -295,14 +203,7 @@ class CLI:
                     """
                     project_name = ctx.obj["project_name"]
                     print(f"[SecretsBootstrap] Initializing vault for: {project_name}")
-
-                    try:
-                        uri = bm.VaultSetup.ensure_vault_ready(project_name)
-                        print(f"[SecretsBootstrap] Vault ready at {uri}")
-                        click.echo(f"✅ Vault initialized: {uri}")
-                    except Exception as e:
-                        print(f"[SecretsBootstrap] Failed to initialize vault: {e}")
-                        raise click.ClickException(str(e))
+                    raise NotImplementedError
 
             class Database:
                 """
@@ -320,9 +221,7 @@ class CLI:
                     - Prints FQDN and admin login info
                     """
                     project = ctx.obj["project_name"]
-                    print(f"[DatabaseSetup] Initializing database for project: {project}")
-                    bm.AzureStrapper.setup(project, "database")
-                    print(f"[DatabaseSetup] ✅ Successfully Initialized!")
+                    raise NotImplementedError
 
             class DockerSetup:
                 """
@@ -403,7 +302,7 @@ class CLI:
                         services (list[str], optional): Services to start. Defaults to ['db'].
 
                     Raises:
-                        subprocess.CalledProcessError if Docker fails to start.
+                        milessubprocess.CalledProcessError if Docker fails to start.
                     """
 
                 @staticmethod
@@ -425,7 +324,7 @@ class CLI:
                         project_path (Path): Path to the root project directory with docker-compose.yml.
 
                     Raises:
-                        subprocess.CalledProcessError if teardown fails.
+                        milessubprocess.CalledProcessError if teardown fails.
                     """
 
                 @staticmethod

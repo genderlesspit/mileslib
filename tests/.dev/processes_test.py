@@ -18,7 +18,7 @@ from azure.keyvault.secrets import SecretClient
 from datetime import datetime
 from threading import Thread
 from webbrowser import open_new_tab
-from mileslib_core import sm, mc, mileslib
+from tests.mileslib_core import sm, mc, mileslib
 import os
 from azure.identity import DefaultAzureCredential
 from azure.keyvault.secrets import SecretClient
@@ -31,8 +31,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 from threading import Thread
 from datetime import datetime
-from mileslib_core import BackendMethods as bm
-from mileslib_core import mileslib_cli
+from tests.mileslib_core import BackendMethods as bm
+from tests.mileslib_core import mileslib_cli
 
 
 
