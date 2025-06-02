@@ -218,29 +218,34 @@ class Cache:
             raise TypeError("Cache.temp_set: value must be a string")
 
         with Cache._lock:
-            if namespace not in Cache._temp_store:
-                Cache._temp_store[namespace] = {}
-            Cache._temp_store[namespace][key] = value
+            Cache._temp_store.setdefault(namespace, {})[key] = value
 
-        print(f"[Cache] TEMP SET {namespace}.{key} = {value}")
+        # Mask secret values in logs
+        if "secret" in key.lower():
+            visible = value[-4:] if len(value) >= 4 else value
+            masked = "*" * (len(value) - len(visible)) + visible
+            print("TEMP SET %s.%s = %s", namespace, key, masked)
+        else:
+            print("TEMP SET %s.%s = %s", namespace, key, value)
 
     @staticmethod
     def temp_get(namespace: str, key: str) -> Optional[str]:
         """
         Retrieve a temporary, in‐memory‐only value. Returns None if not set.
-
-        Args:
-            namespace (str)
-            key       (str)
-
-        Returns:
-            Optional[str]
+        If the key contains 'secret' (case‐insensitive), the logged/masked output
+        will hide all but the last 4 characters.
         """
         with Cache._lock:
-            if namespace in Cache._temp_store and key in Cache._temp_store[namespace]:
-                val = Cache._temp_store[namespace][key]
-                print(f"[Cache] TEMP GET {namespace}.{key} = {val}")
+            ns_map = Cache._temp_store.get(namespace, {})
+            if key in ns_map:
+                val = ns_map[key]
+                if "secret" in key.lower():
+                    visible = val[-4:] if len(val) >= 4 else val
+                    masked = "*" * (len(val) - len(visible)) + visible
+                    print("TEMP GET %s.%s = %s", namespace, key, masked)
+                else:
+                    print("TEMP GET %s.%s = %s", namespace, key, val)
                 return val
 
-        print(f"[Cache] TEMP MISS {namespace}.{key}")
+        print("TEMP MISS %s.%s", namespace, key)
         return None

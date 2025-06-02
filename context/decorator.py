@@ -225,15 +225,15 @@ class Decorator:
             result = None
 
             # Log entry with arguments
-            if logged:
-                log.info(f"[{fn.__qualname__}] Calling with args={args}, kwargs={kwargs}")
+            #if logged:
+                #log.info(f"[{fn.__qualname__}] Calling with args={args}, kwargs={kwargs}")
 
             # If we want timing, record start
             if timed:
                 start = time.perf_counter()
                 result = fn(*args, **kwargs)
                 duration = time.perf_counter() - start
-                log.info(f"[{fn.__qualname__}] Completed in {duration:.3f}s")
+                log.success(f"[{fn.__qualname__}] Completed in {duration:.3f}s")
             else:
                 # No timing, just call
                 result = fn(*args, **kwargs)
