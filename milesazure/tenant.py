@@ -1,11 +1,11 @@
 # tenant.py
 
 import time
-from pathlib import Path
 from typing import Optional
 
 from backend_methods.milesrequests import Requests
 from context import milescontext as mc  # mc.cache is the Cache instance
+from milesazure import run
 from milesazure.run import run_az
 
 
@@ -188,17 +188,38 @@ class AzureSubscription:
     @staticmethod
     def _get_all() -> list[dict]:
         """
-        Returns a list of all available Azure subscriptions.
+        Returns a list of all available Azure subscriptions (each with 'id' and 'name').
 
         Returns:
-            list of dicts with keys 'id' and 'name'
+            List[dict]: [{'id': <subscription_id>, 'name': <subscription_name>}, ...]
         """
-        raw = run_az(
-            ["az", "account", "list", "--output", "json"],
-            capture_output=True
+        # Call the helper that wraps `az account list`
+        raw = run.get_all_subscriptions(
+            capture_output=True,
+            ignore_errors=None,
+            fallbacks=None,
+            force_refresh=False
         )
-        # Assume run_az already parsed JSON into Python list[dict]
-        return raw
+
+        # The Azure CLI `az account list` returns a JSON array, so ensure it's a list
+        if not isinstance(raw, list):
+            raise RuntimeError(f"[Azure._get_all] Expected a list from get_all_subscriptions(), got: {type(raw)}")
+
+        # Extract only the 'id' and 'name' fields from each subscription
+        subs: list[dict] = []
+        for entry in raw:
+            # Defensive checks
+            if not isinstance(entry, dict):
+                print(f"[Azure._get_all] Skipping non-dict entry: {entry!r}")
+                continue
+            sub_id = entry.get("id")
+            sub_name = entry.get("name")
+            if not isinstance(sub_id, str) or not isinstance(sub_name, str):
+                print(f"[Azure._get_all] Missing 'id' or 'name' in entry: {entry!r}")
+                continue
+            subs.append({"id": sub_id, "name": sub_name})
+
+        return subs
 
     @staticmethod
     def help():
@@ -211,6 +232,7 @@ class AzureSubscription:
         print("2. See subscriptions: `az account list --output table`")
         print("3. Set a default: `az account set --subscription <id>`")
         print("────────────────────────────\n")
+
 
 class AzureResourceGroup:
     """
@@ -256,7 +278,7 @@ class AzureResourceGroup:
         """
         Check if the given resource group exists.
         """
-        result = run_az(["az", "group", "exists", "--name", rg_name], capture_output=True)
+        result = run.rg_exists(rg_name)
         return result is True or result == "true"
 
     @staticmethod
@@ -264,12 +286,7 @@ class AzureResourceGroup:
         """
         Create the resource group if it doesn't exist.
         """
-        print(f"[AzureResourceGroup] 🛠️ Creating resource group '{rg_name}' in region '{location}'...")
-        run_az([
-            "az", "group", "create",
-            "--name", rg_name,
-            "--location", location
-        ], capture_output=True)
+        run.rg_create(rg_name, location)
 
     @staticmethod
     def validate(rg_name: str) -> bool:
@@ -279,6 +296,7 @@ class AzureResourceGroup:
         if not AzureResourceGroup.exists(rg_name):
             raise RuntimeError(f"[AzureResourceGroup] ❌ Resource group does not exist: {rg_name}")
         return True
+
 
 class AzureRegion:
     """
@@ -297,19 +315,11 @@ class AzureRegion:
     @staticmethod
     def init(project: str) -> str:
         rg = AzureResourceGroup.get(project)
-
-        try:
-            data = run_az(["az", "group", "show", "--name", rg], capture_output=True)
-            region = data.get("location", "").strip()
-        except Exception as ex:
-            raise RuntimeError(f"[AzureRegion] Could not resolve region from resource group '{rg}': {ex}")
-
-        if not region:
-            raise RuntimeError(f"[AzureRegion] Region missing from az group show response: {data}")
-
+        region = run.region_init(rg)
         mc.cache.set(project, "AZURE_REGION", region, include_in_cfg=project)
         print(f"[AzureRegion] Region resolved from '{rg}': {region}")
         return region
+
 
 class AzureUser:
     """
@@ -396,7 +406,6 @@ class AzureUser:
         user_info = cli_context.get("user", {})
         display_name = user_info.get("name", "Unknown")
         user_type = user_info.get("type", "Unknown")
-
 
         # 🧠 Inject this check:
         if user_type.lower() != "user":

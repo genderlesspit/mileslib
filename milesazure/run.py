@@ -602,3 +602,223 @@ def postgres_create(
         fallbacks=fallbacks,
         force_refresh=force_refresh
     )
+
+def get_all_subscriptions(
+    *,
+    capture_output: bool = True,
+    ignore_errors: dict[str, list[str]] | None = None,
+    fallbacks: dict[str, Callable[[], None]] | None = None,
+    force_refresh: bool = False
+) -> dict:
+    """
+    Retrieve all Azure subscriptions for the current account.
+
+    All defined variables:
+        cmd_list: list[str]
+        result: dict
+
+    Logic:
+        1. Build the Azure CLI command for 'az account list'.
+        2. Invoke run_az with caching, spinner, and the provided flags.
+        3. Return parsed JSON (list of subscriptions).
+        4. On exception, log and re-raise.
+
+    Parameters:
+        capture_output (bool): If False, run interactively (no JSON parsing).
+        ignore_errors (dict[str, list[str]]|None): Error substrings to ignore.
+        fallbacks (dict[str, Callable]|None): Handlers to invoke on specific errors.
+        force_refresh (bool): If True, bypass cache and re-run the command.
+
+    Returns:
+        dict: Parsed JSON list of subscriptions (or {} if non-JSON).
+    """
+    # Build the CLI command
+    cmd_list = ["az", "account", "list"]
+
+    try:
+        result = run_az(
+            cmd_list,
+            capture_output=capture_output,
+            ignore_errors=ignore_errors,
+            fallbacks=fallbacks,
+            force_refresh=force_refresh
+        )
+        logger.info("[Azure.get_all_subscriptions] Retrieved all subscriptions")
+        return result
+    except Exception as ex:
+        logger.error(f"[Azure.get_all_subscriptions] Failed to list subscriptions: {ex}")
+        raise
+
+def rg_exists(
+    rg_name: str,
+    *,
+    capture_output: bool = True,
+    ignore_errors: dict[str, list[str]] | None = None,
+    fallbacks: dict[str, Callable[[], None]] | None = None,
+    force_refresh: bool = False
+) -> bool:
+    """
+    Check if the given resource group exists.
+
+    All defined variables:
+        cmd_list: list[str]
+        result: bool | str | dict
+
+    Logic:
+        1. Validate 'rg_name' is a non‐empty string.
+        2. Build the Azure CLI command for 'az group exists'.
+        3. Invoke run_az with JSON output expected.
+        4. Interpret the return value (bool or "true"/"false" string).
+        5. Return True if it exists, False otherwise.
+    """
+    if not isinstance(rg_name, str) or not rg_name.strip():
+        raise ValueError("AzureResourceGroup.exists: 'rg_name' must be a non-empty string")
+
+    cmd_list = ["az", "group", "exists", "--name", rg_name]
+    try:
+        raw_result = run_az(
+            cmd_list,
+            capture_output=capture_output,
+            ignore_errors=ignore_errors,
+            fallbacks=fallbacks,
+            force_refresh=force_refresh
+        )
+        # run_az with "--output json" will parse "true"/"false" into a Python bool
+        if isinstance(raw_result, bool):
+            return raw_result
+        # In the unlikely event run_az returns a string (non-JSON), interpret it
+        if isinstance(raw_result, str):
+            return raw_result.strip().lower() == "true"
+        # If run_az returned a dict (unexpected), attempt to extract boolean
+        if isinstance(raw_result, dict):
+            # Some Azure CLI commands might wrap boolean in a key, but 'az group exists' returns raw bool
+            # Default to False if structure is unexpected
+            logger.warning(f"[AzureResourceGroup.exists] Unexpected dict result for '{rg_name}': {raw_result}")
+            return False
+        return False
+    except Exception as ex:
+        logger.error(f"[AzureResourceGroup.exists] Error checking existence of '{rg_name}': {ex}")
+        raise
+
+def rg_create(
+    rg_name: str,
+    location: str,
+    *,
+    capture_output: bool = True,
+    ignore_errors: dict[str, list[str]] | None = None,
+    fallbacks: dict[str, Callable[[], None]] | None = None,
+    force_refresh: bool = False
+) -> dict:
+    """
+    Create the resource group if it doesn't exist.
+
+    All defined variables:
+        cmd_list: list[str]
+        result: dict
+
+    Logic:
+        1. Validate 'rg_name' and 'location' are non-empty strings.
+        2. If exists(...) returns True, log and return empty dict.
+        3. Build the Azure CLI command for 'az group create'.
+        4. Invoke run_az with JSON output expected.
+        5. Return the parsed JSON response (resource group properties).
+    """
+    if not isinstance(rg_name, str) or not rg_name.strip():
+        raise ValueError("AzureResourceGroup.create: 'rg_name' must be a non-empty string")
+    if not isinstance(location, str) or not location.strip():
+        raise ValueError("AzureResourceGroup.create: 'location' must be a non-empty string")
+
+    # Check existence first (force_refresh=False to allow caching if recently checked)
+    try:
+        if rg_exists(rg_name, capture_output=True, force_refresh=force_refresh):
+            logger.info(f"[AzureResourceGroup.create] Resource group '{rg_name}' already exists; skipping creation.")
+            return {}
+    except Exception:
+        # If exists(...) fails (e.g., transient error), proceed to attempt creation
+        logger.warning(f"[AzureResourceGroup.create] Could not confirm existence of '{rg_name}', attempting to create anyway.")
+
+    print(f"[AzureResourceGroup] 🛠️ Creating resource group '{rg_name}' in region '{location}'...")
+    cmd_list = [
+        "az", "group", "create",
+        "--name", rg_name,
+        "--location", location
+    ]
+    try:
+        result = run_az(
+            cmd_list,
+            capture_output=capture_output,
+            ignore_errors=ignore_errors,
+            fallbacks=fallbacks,
+            force_refresh=force_refresh
+        )
+        logger.info(f"[AzureResourceGroup.create] Created resource group '{rg_name}' in '{location}'")
+        return result
+    except Exception as ex:
+        logger.error(f"[AzureResourceGroup.create] Failed to create resource group '{rg_name}': {ex}")
+        raise
+
+def region_init(
+    rg_name: str,
+    *,
+    capture_output: bool = True,
+    ignore_errors: dict[str, list[str]] | None = None,
+    fallbacks: dict[str, Callable[[], None]] | None = None,
+    force_refresh: bool = False
+) -> str:
+    """
+    Resolve the Azure region for a given project by inspecting its resource group, then cache it.
+
+    All defined variables:
+        rg: str
+        data: dict
+        region: str
+
+    Logic:
+        1. Validate 'project' is a non-empty string.
+        2. Retrieve the resource group name via AzureResourceGroup.get(project).
+        3. Call `az group show --name <rg>` to get resource group details.
+        4. Extract 'location' from the JSON response.
+        5. If location is missing or empty, raise RuntimeError.
+        6. Cache the region under key "{project}.AZURE_REGION" via mc.cache.set.
+        7. Print resolved region and return it.
+
+    Parameters:
+        project (str): The project namespace used to look up its resource group.
+        capture_output (bool): Whether to capture stdout/stderr (JSON expected).
+        ignore_errors (dict[str, list[str]]|None): Substrings to ignore in stderr.
+        fallbacks (dict[str, Callable]|None): Fallback handlers for specific errors.
+        force_refresh (bool): If True, bypass any caching in run_az.
+
+    Returns:
+        str: The Azure region string (e.g., "eastus").
+    """
+    # 1) Deprecated
+    # 2) Get resource group name for this project
+    rg = rg_name
+    if not isinstance(rg, str) or not rg.strip():
+        raise RuntimeError(f"[AzureRegion] Invalid resource group returned for: {rg!r}")
+
+    # 3) Query Azure for resource group details
+    try:
+        data = run_az(
+            ["az", "group", "show", "--name", rg],
+            capture_output=capture_output,
+            ignore_errors=ignore_errors,
+            fallbacks=fallbacks,
+            force_refresh=force_refresh
+        )
+    except Exception as ex:
+        raise RuntimeError(f"[AzureRegion] Could not resolve region from resource group '{rg}': {ex}")
+
+    # 4) Extract 'location'
+    region = ""
+    if isinstance(data, dict):
+        region = data.get("location", "")
+        if isinstance(region, str):
+            region = region.strip()
+    if not region:
+        raise RuntimeError(f"[AzureRegion] Region missing from 'az group show' response for '{rg}': {data!r}")
+
+    # 5) Inform user and return
+    print(f"[AzureRegion] Region resolved from resource group '{rg}': {region}")
+    return region
