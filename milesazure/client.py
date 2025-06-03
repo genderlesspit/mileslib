@@ -4,6 +4,7 @@ from typing import Dict, Optional, Any
 
 from milesazure import tenant  # tenant.user, tenant.tenant_id, tenant.subscription_id
 from milesazure.run import run_az
+import milesazure.run as run
 from context import milescontext as mc  # mc.cache is the Cache instance
 from milesazure.tenant import AzureSubscription
 from util.error_handling import recall
@@ -96,7 +97,12 @@ class AzureClient:
             """
             nonlocal app, app_id, cached_app_id
             full = f"{project}-app"
-            cached_app_id = mc.cache.get(project, "app_id")
+            try: cached_app_id = mc.cache.get(project, "app_id")
+            except Exception:
+                print(f"[AzureClient] Could not retrieve AppID for {project}")
+                pass
+
+            print("[AzureClient] Could not find app_id. Attempting to create!")
 
             if cached_app_id:
                 app = AzureClient.verify_app(project, full, cached_app_id)
@@ -106,11 +112,11 @@ class AzureClient:
                 if not app:
                     # Cached ID was invalid or verify failed → create anew
                     app_id = AzureClient.create_app(project, full)
-                    app = run_az(["az", "ad", "app", "show", "--id", app_id])
+                    app = run.app_show(project)
             else:
                 # No cached app_id → create a new AAD application
                 app_id = AzureClient.create_app(project, full)
-                app = run_az(["az", "ad", "app", "show", "--id", app_id])
+                app = run.app_show(project)
 
         # ─────────────────────────────
         # Logic
@@ -220,30 +226,36 @@ class AzureClient:
             str: The newly created AAD application's GUID.
 
         Variables:
-            create_resp (dict): Result from `az ad app create --display-name display_name`.
+            create_resp (dict): Result from `run.app_create(display_name)`.
             new_app_id (str): Extracted "appId" from create_resp.
         """
+        # --- All defined variables ---
+        create_resp: dict
+        new_app_id: str
+
+        # --- Logic ---
+        # Call the wrapper that invokes `az ad app create`
+        create_resp = run.app_create(display_name)
+        logger.debug(f"[AzureClient.create_app] Raw response from az ad app create: {create_resp!r}")
+
+        # Validate that we got a dict back
+        if not isinstance(create_resp, dict):
+            raise RuntimeError(f"[AzureClient.create_app] Expected dict from run.app_create(), got {type(create_resp).__name__!r}")
+
+        # Extract the "appId" field
+        new_app_id = create_resp.get("appId")
+        if not new_app_id or not isinstance(new_app_id, str):
+            raise RuntimeError(f"[AzureClient.create_app] Could not find a valid 'appId' in response: {create_resp!r}")
+
+        # Cache the app_id under the given project namespace
         try:
-            create_resp: Dict[str, Any] = run_az([
-                "az", "ad", "app", "create",
-                "--display-name", display_name,
-                "--query", "appId",
-                "--output", "tsv"
-            ])
+            mc.cache.set(project, "app_id", new_app_id, include_in_cfg=project)
         except Exception as ex:
-            raise RuntimeError(
-                f"[AzureClient] Failed to create AAD app '{display_name}': {ex}"
-            )
+            logger.error(f"[AzureClient.create_app] Failed to cache app_id: {ex}", exc_info=True)
+            raise
 
-        new_app_id: Optional[str] = create_resp
-        if not new_app_id:
-            raise RuntimeError(
-                f"[AzureClient] AAD app creation returned no appId for '{display_name}'."
-            )
+        logger.info(f"[AzureClient.create_app] Created AAD app '{display_name}' with appId={new_app_id!r} and cached under '{project}'")
 
-        # Cache the new app_id for future reuse
-        mc.cache.set(project, "app_id", new_app_id)
-        logger.info(f"[AzureClient] Created and cached new app_id={new_app_id} for '{project}'")
         return new_app_id
 
     @staticmethod

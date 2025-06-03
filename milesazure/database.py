@@ -161,7 +161,8 @@ class DatabaseSetup:
                 "DB_SERVER_NAME": db_name,
                 "DB_FQDN": fqdn,
                 "DB_LOCATION": location,
-                "DB_ID": server_id
+                "DB_ID": server_id,
+                "DB_ADMIN_USER": "adminuser"
             }
         except subprocess.CalledProcessError as e:
             # Even with ignore_errors, we guard in case unexpected errors slip through

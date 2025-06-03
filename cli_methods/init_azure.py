@@ -1,3 +1,4 @@
+import milesazure
 from milesazure import ids
 from milesazure.vault import VaultSetup
 
@@ -17,5 +18,7 @@ def init_azure(ctx):
 
     print(f"[init_azure] Validating Azure identity for project: {project}")
     ids.AzureIDs.validate_all(project)
-    ids.AzureServices.validate_all(project)
+    ctx = ids.AzureServicePrincipal.get_context(project)
+    print("[Azure.ServicePrincipal] CTX Initialized: ", ctx)
+    milesazure.provision.Provision.provision_all(project)
 

@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional, Dict, Any
 
 from milesazure.client import AzureClient
@@ -35,9 +36,11 @@ class AzureIDs:
             return
 
         user_ctx = AzureUser.get(project)
+        print("[AzureIDs.debug] USER_CTX:", user_ctx)
         app_ctx = AzureClient.get(project)
+        print("[AzureIDs.debug] APP_CTX:", app_ctx)
         if not user_ctx or not app_ctx:
-            raise RuntimeError(f"[AzureIDs] Missing Azure context for project '{project}'")
+            raise RuntimeError(f"[AzureIDs] Error fetching Azure context for project '{project}'")
 
         AzureIDs._cache[project] = {"user_ctx": user_ctx, "app_ctx": app_ctx}
         logger.debug(f"[AzureIDs] Cached contexts for project '{project}'")
@@ -143,317 +146,355 @@ class AzureIDs:
             AzureIDs._cache.clear()
             logger.debug("[AzureIDs] Cleared entire cache")
 
-class AzureServices:
+class AzureServicePrincipal:
     """
-    Centralized resolver for Azure service-specific names, URIs, and naming quirks,
-    including Key Vault and PostgreSQL metadata. Before resolving any metadata, this class
-    ensures that the service-principal is logged in (via `sp_context`) and that all AzureIDs are valid.
+    Simplified resolver for Azure service principal context and Key Vault setup.
+    Responsibilities:
+      - Log in as service principal for a given project.
+      - Ensure the Key Vault exists for the project.
+      - Ensure the service principal has Contributor role on the project's resource group.
+      - Ensure the service principal has Key Vault Administrator role on the project vault.
+      - Provide an entry point to retrieve all relevant SP context in a cached dict.
+    """
 
-    Structure mimics AzureIDs:
-      - _sp_context: caches per-project SP login context/credentials
-      - _init_sp_context(): validate identities + login as SP
-      - _mapping(): combines vault, database, and other static service conventions
-      - get(): fetch a single service key
-      - validate_all(): ensure no missing service keys
-    """
-    _sp_context: Dict[str, Dict[str, Any]] = {}
+    _sp_context: Dict[str, Dict[str, str]] = {}
 
     @staticmethod
     def _init_sp_context(project: str) -> None:
         """
-        Initialize (or retrieve) the service-principal context for `project` and log in as the SP.
+        Initialize (or retrieve) the service-principal context for `project`.
 
-        Steps:
-            1. If project already in AzureServices._sp_context, do nothing.
-            2. Call AzureIDs.validate_all(project) to retrieve:
-                   - AZURE_TENANT_ID
-                   - AZURE_SUBSCRIPTION_ID
-                   - AZURE_CLIENT_ID
-                   - AZURE_CLIENT_SECRET
-            3. Use run_az(...) to perform:
-                   az login --service-principal --username <client_id> --password <client_secret> --tenant <tenant_id>
-            4. Use run_az(...) to set the subscription:
+        Variables:
+            identities: Dict[str, str]    # output of AzureIDs.validate_all
+            tenant_id: str
+            subscription_id: str
+            client_id: str
+            client_secret: str
+            sp_object_id: str
+
+        Sub-functions:
+            _validate_identities()        # calls AzureIDs.validate_all(project)
+            _login_sp()                   # calls run_az([... "az login" ...])
+            _set_subscription()           # calls run_az([... "az account set" ...])
+
+        Logic:
+            1. If project already in AzureServicePrincipal._sp_context, return immediately.
+            2. identities = AzureIDs.validate_all(project)
+               - Raises if any identity is missing.
+               - Expected keys: "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID",
+                                "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "SP_OBJECT_ID"
+            3. Extract tenant_id, subscription_id, client_id, client_secret, sp_object_id.
+            4. Call AzureServicePrincipal.assign_rbac(sp_object_id, project)
+               - Ensures SP has Contributor on the RG and Key Vault exists; also assigns Secrets User role.
+            5. Call run_az to log in as SP:
+                   az login --service-principal
+                            --username <client_id>
+                            --password <client_secret>
+                            --tenant <tenant_id>
+               - If run_az fails, raise RuntimeError with context.
+            6. Call run_az to set subscription:
                    az account set --subscription <subscription_id>
-            5. On success, store a dict with at least:
-                   {
-                     "tenant_id": str,
-                     "subscription_id": str,
-                     "client_id": str,
-                     "client_secret": str
+               - If run_az fails, raise RuntimeError with context.
+            7. Cache in _sp_context:
+                   AzureServicePrincipal._sp_context[project] = {
+                       "tenant_id": tenant_id,
+                       "subscription_id": subscription_id,
+                       "client_id": client_id,
+                       "client_secret": client_secret
                    }
-               in AzureServices._sp_context[project].
-            6. Log debug messages at each step. If any call fails, raise RuntimeError.
+            8. Log info about successful initialization.
         """
-        if project in AzureServices._sp_context:
-            return  # Already initialized
+        if not isinstance(project, str) or not project.strip():
+            raise TypeError("AzureServicePrincipal._init_sp_context: 'project' must be a non-empty string")
 
-        # Step 2: Validate all identity values
-        identities = AzureIDs.validate_all(project)
+        if project in AzureServicePrincipal._sp_context:
+            logger.debug("[AzureServicePrincipal] SP context for '%s' already initialized; skipping.", project)
+            return
+
+        try:
+            identities: Dict[str, str] = AzureIDs.validate_all(project)
+        except Exception as ex:
+            raise RuntimeError(f"[AzureServicePrincipal] Identity validation failed for '{project}': {ex}")
+
         tenant_id = identities["AZURE_TENANT_ID"]
         subscription_id = identities["AZURE_SUBSCRIPTION_ID"]
         client_id = identities["AZURE_CLIENT_ID"]
         client_secret = identities["AZURE_CLIENT_SECRET"]
-        sp_object_id =  identities["SP_OBJECT_ID"]
+        sp_object_id = identities["SP_OBJECT_ID"]
 
-        # Step 2.5 Assign RBAC.
-        AzureServices.assign_rbac(sp_object_id, project)
+        logger.debug(
+            "[AzureServicePrincipal] Retrieved identities for '%s': tenant=%s sub=%s client=%s",
+            project, tenant_id, subscription_id, client_id
+        )
 
-        # Step 3: Login as service principal
         try:
-            run_az([
-                "az", "login",
-                "--service-principal",
-                "--username", client_id,
-                "--password", client_secret,
-                "--tenant", tenant_id
-            ])
-            logger.debug(f"[AzureServices] Logged in as SP for project '{project}'.")
+            AzureServicePrincipal.assign_rbac(sp_object_id, project)
         except Exception as ex:
-            raise RuntimeError(f"[AzureServices] Failed SP login for project '{project}': {ex}")
+            raise RuntimeError(f"[AzureServicePrincipal] RBAC assignment failed for '{project}': {ex}")
 
-        # Step 4: Set subscription
         try:
-            run_az([
-                "az", "account", "set",
-                "--subscription", subscription_id
-            ])
-            logger.debug(f"[AzureServices] Set subscription '{subscription_id}' for project '{project}'.")
+            run_az(
+                [
+                    "az", "login",
+                    "--service-principal",
+                    "--username", client_id,
+                    "--password", client_secret,
+                    "--tenant", tenant_id
+                ],
+                capture_output=False,
+                json_override=False
+            )
+            logger.debug("[AzureServicePrincipal] Logged in as SP for project '%s'.", project)
         except Exception as ex:
-            raise RuntimeError(f"[AzureServices] Failed to set subscription for project '{project}': {ex}")
+            raise RuntimeError(f"[AzureServicePrincipal] Failed SP login for '{project}': {ex}")
 
-        # Step 5: Cache the SP context
-        AzureServices._sp_context[project] = {
+        try:
+            run_az(
+                ["az", "account", "set", "--subscription", subscription_id],
+                capture_output=False
+            )
+            logger.debug("[AzureServicePrincipal] Set subscription '%s' for project '%s'.", subscription_id, project)
+        except Exception as ex:
+            raise RuntimeError(f"[AzureServicePrincipal] Failed to set subscription for '{project}': {ex}")
+
+        AzureServicePrincipal._sp_context[project] = {
             "tenant_id": tenant_id,
             "subscription_id": subscription_id,
             "client_id": client_id,
             "client_secret": client_secret
         }
+        logger.info("[AzureServicePrincipal] SP context initialized and cached for project '%s'.", project)
 
     @staticmethod
     def assign_rbac(sp_object_id: str, project: str) -> None:
         """
-        For the service principal identified by `sp_object_id`, assign all RBAC roles needed to manage the stack.
-        If the target resource doesn't exist, create it first and then retry the assignment.
-        """
-        sub_id = AzureIDs.get("AZURE_SUBSCRIPTION_ID", project)
-        rg     = AzureIDs.get("RESOURCE_GROUP", project)
+        Ensure the service principal has:
+          - Contributor role on the project's Resource Group.
+          - Key Vault Administrator role on the project's Key Vault.
 
-        # Build each scope string
+        Variables:
+            sub_id: str                   # subscription ID from AzureIDs.get
+            rg: str                       # resource group name from AzureIDs.get
+            rg_scope: str                 # "/subscriptions/{sub_id}/resourceGroups/{rg}"
+            vault_id: str                 # full resource ID of the Key Vault
+
+        Logic:
+            1. sub_id = AzureIDs.get("AZURE_SUBSCRIPTION_ID", project, required=True)
+            2. rg = AzureIDs.get("RESOURCE_GROUP", project, required=True)
+            3. Build rg_scope = f"/subscriptions/{sub_id}/resourceGroups/{rg}"
+            4. Ensure Key Vault exists: vault_meta = VaultSetup.get_vault(project)
+               - This will create the vault if missing.
+            5. vault_id = vault_meta["VAULT_ID"]
+            6. Assign "Contributor" on rg_scope:
+                   az role assignment create --assignee <sp_object_id> --role Contributor --scope rg_scope
+               - Wait until assignment is visible.
+            7. Assign "Key Vault Administrator" on vault_id:
+                   az role assignment create --assignee-object-id <sp_object_id> --role "Key Vault Administrator" --scope vault_id
+               - Wait until assignment is visible.
+        """
+
+        if not all(isinstance(x, str) and x.strip() for x in (sp_object_id, project)):
+            raise TypeError("AzureServicePrincipal.assign_rbac: 'sp_object_id' and 'project' must be non-empty strings")
+
+        try:
+            sub_id: str = AzureIDs.get("AZURE_SUBSCRIPTION_ID", project, required=True)
+            rg: str = AzureIDs.get("RESOURCE_GROUP", project, required=True)
+        except Exception as ex:
+            raise RuntimeError(f"[AzureServicePrincipal] Could not retrieve subscription or RG for '{project}': {ex}")
+
         rg_scope = f"/subscriptions/{sub_id}/resourceGroups/{rg}"
-        vault_scope = (
-            f"/subscriptions/{sub_id}/resourceGroups/{rg}"
-            f"/providers/Microsoft.KeyVault/vaults/{project.lower()}-vault"
-        )
-        db_scope = (
-            f"/subscriptions/{sub_id}/resourceGroups/{rg}"
-            f"/providers/Microsoft.DBforPostgreSQL/flexibleServers/{project.lower()}-db"
-        )
+        logger.debug("[AzureServicePrincipal] assign_rbac: sub_id=%s, rg=%s, sp_object_id=%s", sub_id, rg, sp_object_id)
 
-        # (You could add storage_scope, func_scope, etc. in the same pattern.)
-        assignments = [
-            # (scope, role_name, create_callback)
-            (rg_scope,    "Contributor",               None),  # RG should always exist
-            (vault_scope, "Key Vault Contributor",      VaultSetup.create_vault),
-            (db_scope,    "Contributor",               DatabaseSetup.create_postgres),
-        ]
+        try:
+            vault_meta = VaultSetup.get_vault(project)
+            vault_id = vault_meta["VAULT_ID"]
+            logger.debug("[AzureServicePrincipal] Vault ensured for project '%s', vault_id='%s'.", project, vault_id)
+        except Exception as ex:
+            raise RuntimeError(f"[AzureServicePrincipal] Key Vault setup failed for '{project}': {ex}")
 
-        for scope, role_name, create_fn in assignments:
-            AzureServices._assign_role_with_fallback(
-                sp_object_id, project, scope, role_name, create_fn
-            )
-
-        logger.info("[AzureServices] ✅ All RBAC assignments complete.")
-
-    @staticmethod
-    def _assign_role_with_fallback(
-        sp_object_id: str,
-        project: str,
-        scope: str,
-        role_name: str,
-        create_fn: callable = None
-    ) -> None:
-        """
-        Attempt to assign `role_name` on `scope` to the SP. If Azure returns ResourceNotFound,
-        call `create_fn(project)` (if provided), then retry the same role assignment once.
-        """
-        def _do_assignment() -> None:
+        def _assign_contributor():
             run_az(
                 [
                     "az", "role", "assignment", "create",
                     "--assignee", sp_object_id,
-                    "--role",     role_name,
-                    "--scope",    scope,
+                    "--role", "Contributor",
+                    "--scope", rg_scope
                 ],
                 capture_output=False
             )
 
+        def _assign_kv_admin():
+            run_az(
+                [
+                    "az", "role", "assignment", "create",
+                    "--assignee-object-id", sp_object_id,
+                    "--role", "Key Vault Administrator",
+                    "--scope", vault_id
+                ],
+                capture_output=False
+            )
+
+        def _check_role_assigned(role_name: str, scope: str) -> bool:
+            """
+            Returns True if a role assignment with roleDefinitionName == role_name
+            exists for sp_object_id on the given scope.
+            """
+            try:
+                result = run_az(
+                    [
+                        "az", "role", "assignment", "list",
+                        "--scope", scope,
+                        "--query", f"[?principalId=='{sp_object_id}' && roleDefinitionName=='{role_name}']"
+                    ]
+                )
+                # run_az should return a Python list after parsing JSON output
+                return bool(result and isinstance(result, list) and len(result) > 0)
+            except Exception as ex:
+                logger.debug("[AzureServicePrincipal] Error checking '%s' on '%s': %s", role_name, scope, ex)
+                return False
+
+        # 1. Assign Contributor on the resource group
         try:
-            logger.info(f"[AzureServices] Assigning '{role_name}' on '{scope}' to SP {sp_object_id}")
-            _do_assignment()
-            logger.debug(f"[AzureServices] → Success: '{role_name}' on '{scope}'")
+            logger.info("[AzureServicePrincipal] Assigning 'Contributor' on '%s' to SP '%s'.", rg_scope, sp_object_id)
+            _assign_contributor()
+            logger.info("[AzureServicePrincipal] → Role 'Contributor' assignment triggered.")
         except Exception as ex:
             stderr = str(ex).lower()
-            # Detect a missing-resource error (PostgreSQL or KeyVault not found)
-            if create_fn and ("resourcenotfound" in stderr or "was not found" in stderr):
-                logger.warning(f"[AzureServices] Resource at '{scope}' not found. "
-                               f"Calling creation callback and retrying…")
-                try:
-                    # create_fn must be a function that takes (project) and returns
-                    # once the resource is in place—e.g. VaultSetup.create_vault or DatabaseSetup.create_postgres
-                    if create_fn is VaultSetup.create_vault:
-                        # VaultSetup.create_vault returns a dict with "name" and "uri",
-                        # but we only care that the vault ends up existing.
-                        create_fn(project)
-                    else:
-                        # For DatabaseSetup.create_postgres, it returns metadata dict.
-                        create_fn(project)
-
-                    # Now retry the assignment one more time
-                    logger.info(f"[AzureServices] Retrying '{role_name}' on '{scope}' after creation")
-                    _do_assignment()
-                    logger.debug(f"[AzureServices] → Success on retry: '{role_name}' on '{scope}'")
-                except Exception as ex2:
-                    logger.error(f"[AzureServices] Failed to both create resource at '{scope}' and assign role: {ex2}")
-                    raise RuntimeError(f"Could not create resource‐and‐assign '{role_name}' on '{scope}': {ex2}")
+            if "resourcenotfound" in stderr or "was not found" in stderr:
+                raise RuntimeError(f"[AzureServicePrincipal] Resource Group '{rg}' not found for '{project}': {ex}")
             else:
-                # Any other failure type we bubble up
-                logger.error(f"[AzureServices] Could not assign '{role_name}' on '{scope}': {ex}")
-                raise
+                raise RuntimeError(f"[AzureServicePrincipal] Role assignment (Contributor) failed for '{project}': {ex}")
+
+        # Wait loop for Contributor assignment to propagate
+        max_wait = 60  # seconds
+        interval = 5   # seconds
+        waited = 0
+        while waited < max_wait:
+            if _check_role_assigned("Contributor", rg_scope):
+                logger.info("[AzureServicePrincipal] Confirmed 'Contributor' role on '%s'.", rg_scope)
+                break
+            logger.debug("[AzureServicePrincipal] Waiting for 'Contributor' role on '%s' to propagate...", rg_scope)
+            time.sleep(interval)
+            waited += interval
+        else:
+            raise RuntimeError(f"[AzureServicePrincipal] Timed out waiting for 'Contributor' assignment on '{rg_scope}'")
+
+        # 2. Assign Key Vault Administrator on the vault
+        try:
+            logger.info("[AzureServicePrincipal] Assigning 'Key Vault Administrator' on vault '%s' to SP '%s'.", vault_id, sp_object_id)
+            _assign_kv_admin()
+            logger.info("[AzureServicePrincipal] → Role 'Key Vault Administrator' assignment triggered.")
+        except Exception as ex:
+            stderr = str(ex).lower()
+            if "already exists" in stderr or "exists" in stderr:
+                logger.info("[AzureServicePrincipal] 'Key Vault Administrator' role already assigned; skipping.")
+            else:
+                raise RuntimeError(f"[AzureServicePrincipal] Role assignment (Key Vault Administrator) failed for '{project}': {ex}")
+
+        # Wait loop for Key Vault Administrator assignment to propagate
+        waited = 0
+        while waited < max_wait:
+            if _check_role_assigned("Key Vault Administrator", vault_id):
+                logger.info("[AzureServicePrincipal] Confirmed 'Key Vault Administrator' role on vault '%s'.", vault_id)
+                break
+            logger.debug("[AzureServicePrincipal] Waiting for 'Key Vault Administrator' role on vault '%s' to propagate...", vault_id)
+            time.sleep(interval)
+            waited += interval
+        else:
+            raise RuntimeError(f"[AzureServicePrincipal] Timed out waiting for 'Key Vault Administrator' assignment on vault '{vault_id}'")
+
+    @staticmethod
+    def get_context(project: str) -> Dict[str, str]:
+        """
+        Entry point to retrieve all relevant service principal context for `project`.
+        Ensures the context is initialized and returns a cached dictionary with:
+            - tenant_id
+            - subscription_id
+            - client_id
+            - client_secret
+
+        Logic:
+            1. Validate `project` is a non-empty string.
+            2. Call _init_sp_context(project) to initialize if not already cached.
+            3. Return AzureServicePrincipal._sp_context[project].
+
+        Returns:
+            Dict[str, str]: {
+                "tenant_id": <tenant_id>,
+                "subscription_id": <subscription_id>,
+                "client_id": <client_id>,
+                "client_secret": <client_secret>
+            }
+
+        Raises:
+            TypeError: If `project` is not a non-empty string.
+            RuntimeError: If context initialization fails.
+        """
+        if not isinstance(project, str) or not project.strip():
+            raise TypeError("AzureServicePrincipal.get_context: 'project' must be a non-empty string")
+
+        AzureServicePrincipal._init_sp_context(project)
+
+        context = AzureServicePrincipal._sp_context.get(project)
+        if not context:
+            raise RuntimeError(f"[AzureServicePrincipal] SP context missing for '{project}' after initialization")
+
+        logger.debug("[AzureServicePrincipal] Returning SP context for project '%s': %s", project, context)
+        return context
 
     @staticmethod
     def get_vault_metadata(project: str) -> Dict[str, str]:
         """
-        Retrieve Key Vault metadata for the given project by simply calling
-        VaultSetup.get_vault(project). If VaultSetup.get_vault(...) raises,
-        the error is propagated unchanged.
+        Retrieve Key Vault metadata for the given project.
+
+        Variables:
+            vault_meta: Dict[str, Any]    # output of VaultSetup.get_vault
+            result: Dict[str, str]        # filtered metadata
+
+        Sub-functions:
+            _ensure_authenticated()        # calls _init_sp_context(project)
+
+        Logic:
+            1. Call AzureServicePrincipal._init_sp_context(project) to authenticate SP.
+            2. Call VaultSetup.get_vault(project) to create or fetch vault.
+            3. Extract:
+                   "VAULT_NAME", "VAULT_URI", "VAULT_LOCATION", "VAULT_ID"
+               from vault_meta.
+            4. If any required field missing or empty, raise RuntimeError.
+            5. Return a dict with those keys and values.
 
         Returns:
-            {
-                "VAULT_NAME": str,
-                "VAULT_URI": str,
-                "VAULT_LOCATION": str,
-                "VAULT_ID": str,
-                # (plus any additional fields VaultSetup.get_vault() provides)
+            Dict[str, str]: {
+                "VAULT_NAME": <name>,
+                "VAULT_URI": <uri>,
+                "VAULT_LOCATION": <location>,
+                "VAULT_ID": <id>
             }
-        """
-        AzureServices._init_sp_context(project)
 
-        # Delegates entirely to vault.py's VaultSetup.get_vault(...)
+        Raises:
+            TypeError: If `project` is not a non-empty string.
+            RuntimeError: If vault setup or metadata extraction fails.
+        """
+        if not isinstance(project, str) or not project.strip():
+            raise TypeError("AzureServicePrincipal.get_vault_metadata: 'project' must be a non-empty string")
+
+        AzureServicePrincipal._init_sp_context(project)
+
         try:
             vault_meta = VaultSetup.get_vault(project)
-            logger.info(f"[AzureServices] Fetched vault metadata for '{project}': {vault_meta}")
-            return {
-                "VAULT_NAME": vault_meta.get("VAULT_NAME"),
-                "VAULT_URI": vault_meta.get("VAULT_URI"),
-                "VAULT_LOCATION": vault_meta.get("VAULT_LOCATION"),
-                "VAULT_ID": vault_meta.get("VAULT_ID"),
-            }
-        except Exception as e:
-            # Let VaultSetup.raise its own RuntimeError if it fails
-            raise
+        except Exception as ex:
+            raise RuntimeError(f"[AzureServicePrincipal] VaultSetup.get_vault failed for '{project}': {ex}")
 
-    @staticmethod
-    def get_postgresql_metadata(project: str) -> Dict[str, str]:
-        """
-        Ensure a PostgreSQL flexible server exists and is reachable for `project`.
-
-        Returns a dict containing at least:
-            {
-                "DB_SERVER_NAME": str,
-                "DB_FQDN": str,
-                "DB_LOCATION": str,
-                "DB_ID": str,
-                "admin_login": str
-            }
-
-        Implementation outline:
-            1. Call AzureServices._init_sp_context(project) to ensure SP is logged in.
-            2. Import milesazure.database.DatabaseSetup.
-            3. Call DatabaseSetup.ensure_postgres_ready(project) which should:
-                   - Create or retrieve an existing PostgreSQL flexible server.
-                   - Return the required metadata dictionary.
-            4. Return whatever DatabaseSetup.ensure_postgres_ready(...) returns.
-            5. If it raises, propagate or wrap in a RuntimeError.
-        """
-        AzureServices._init_sp_context(project)
-        try:
-            return DatabaseSetup.ensure_postgres_ready(project)
-        except Exception as e:
-            raise RuntimeError(f"[AzureServices] Failed to get PostgreSQL metadata for '{project}': {e}")
-
-    @staticmethod
-    def _mapping(project: str) -> Dict[str, str]:
-        """
-        Combine vault metadata, PostgreSQL metadata, and other static service conventions into one map.
-
-        Returns a dict with keys:
-            - "VAULT_NAME", "VAULT_URI", "VAULT_LOCATION", "VAULT_ID"
-            - "DB_SERVER_NAME", "DB_FQDN", "DB_LOCATION", "DB_ID", "admin_login"
-            - "STORAGE_ACCOUNT", "STATIC_CONTAINER", "FUNCTION_APP_NAME", "FUNCTION_STORAGE"
-
-        Implementation outline:
-            1. Normalize project name: p = project.lower().
-            2. Prepare a static_map for storage/function naming conventions.
-            3. Call get_vault_metadata(project) to retrieve vault_map.
-            4. Call get_postgresql_metadata(project) to retrieve db_map.
-            5. Merge all three dicts (vault_map, db_map, static_map) into one and return.
-        """
-        p = project.lower()
-        static_map = {
-            "STORAGE_ACCOUNT": f"{p}storage",
-            "STATIC_CONTAINER": "$web",
-            "FUNCTION_APP_NAME": f"{p}-func",
-            "FUNCTION_STORAGE": f"{p}storage",
+        result = {
+            "VAULT_NAME":     vault_meta.get("VAULT_NAME", ""),
+            "VAULT_URI":      vault_meta.get("VAULT_URI", ""),
+            "VAULT_LOCATION": vault_meta.get("VAULT_LOCATION", ""),
+            "VAULT_ID":       vault_meta.get("VAULT_ID", ""),
         }
 
-        vault_map = AzureServices.get_vault_metadata(project)
-        db_map = AzureServices.get_postgresql_metadata(project)
-        combined = {**vault_map, **db_map, **static_map}
-        return combined
+        missing_keys = [k for k, v in result.items() if not isinstance(v, str) or not v]
+        if missing_keys:
+            raise RuntimeError(f"[AzureServicePrincipal] Missing vault metadata for keys {missing_keys} in project '{project}'")
 
-    @staticmethod
-    def get(key: str, project: str, required: bool = True) -> Optional[str]:
-        """
-        Retrieve a specific Azure service or vault value for a given project.
-
-        Args:
-            key (str): Name of the service key to fetch (e.g. "VAULT_URI", "DB_FQDN", "FUNCTION_APP_NAME").
-            project (str): Project name/identifier.
-            required (bool): If True, raises RuntimeError when the key is missing or empty.
-
-        Returns:
-            Optional[str]: The requested service value, or None if not required and missing.
-
-        Implementation outline:
-            1. Call AzureServices._mapping(project) to get the full dict.
-            2. Look up mapping.get(key).
-            3. If value is None or empty string and required=True, raise RuntimeError.
-            4. Log a debug message showing the resolved value.
-            5. Return the value.
-        """
-        mapping = AzureServices._mapping(project)
-        val = mapping.get(key)
-        if (val is None or val == "") and required:
-            raise RuntimeError(f"[AzureServices] Missing required value for key '{key}' in project '{project}'")
-        logger.debug(f"[AzureServices] Resolved '{key}' for project '{project}': {val}")
-        return val
-
-    @staticmethod
-    def validate_all(project: str) -> Dict[str, str]:
-        """
-        Return all service, vault, and PostgreSQL values for a given project; raise if any are missing.
-
-        Returns:
-            Dict[str, str]: A map containing all required service values (none empty).
-
-        Implementation outline:
-            1. Call AzureServices._mapping(project).
-            2. Identify any keys where the value is falsy (None or empty string).
-            3. If any missing, raise RuntimeError listing them.
-            4. Otherwise return the full mapping.
-        """
-        mapping = AzureServices._mapping(project)
-        missing = [k for k, v in mapping.items() if not v]
-        if missing:
-            raise RuntimeError(f"[AzureServices] Missing required keys for project '{project}': {missing}")
-        return mapping  # type: ignore
+        logger.info("[AzureServicePrincipal] Fetched vault metadata for '%s': %s", project, result)
+        return result

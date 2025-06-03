@@ -1,5 +1,6 @@
 import builtins
 import inspect
+import logging
 import time
 import uuid
 from functools import wraps
@@ -15,8 +16,13 @@ from context.logger import Logger, log_func
 
 class Decorator:
     """
-    MilesLib-compatible decorator with full log capture for print/echo,
-    retry/fix, timed, safe modes, and hierarchical func-name context.
+    MilesLib-compatible decorator that captures:
+      - builtins.print
+      - click.echo
+      - Python's standard logging (logging.getLogger(...).info, warning, error, etc.)
+      - Retry/fix logic
+      - Timing and safe modes
+      - Hierarchical function-name context via log_func
     """
 
     @staticmethod
@@ -32,7 +38,7 @@ class Decorator:
         label: Optional[str] = None,
     ):
         """
-        Primary decorator factory. Usage:
+        Decorator factory. Usage:
 
             @mileslib()                # defaults
             @mileslib(retry=True, fix=[...])
@@ -41,7 +47,7 @@ class Decorator:
 
         Parameters:
             retry (bool):            If True, wrap in retry logic via mu.attempt/mu.recall.
-            fix (Callable or list):  One or more fix‐functions to run before retrying.
+            fix (Callable or list):  One or more fix-functions to run before retrying.
             timed (bool):            If True, log execution duration.
             logged (bool):           If True, log entry/exit and args/kwargs.
             safe (bool):             If True, catch exceptions and return None.
@@ -50,18 +56,23 @@ class Decorator:
             label (str):             (Reserved) label for downstream instrumentation.
         """
         def decorator(fn):
-            # If decorating a staticmethod/classmethod, unwrap:
+            # If decorating a staticmethod/classmethod, unwrap to the underlying function
             if isinstance(fn, (staticmethod, classmethod)):
                 fn = fn.__func__
 
-            uid = uuid.uuid4().hex[:8]  # currently unused, reserved for deeper context tagging.
+            uid = uuid.uuid4().hex[:8]  # reserved for deeper context tagging
 
             @wraps(fn)
             def wrapper(*args, **kwargs):
                 name = fn.__qualname__
                 with log_func(name):
+                    # Initialize Loguru logger
                     log = Decorator._init_logger()
-                    Decorator._hijack_stdout(log, name)
+
+                    # Hijack print/echo and Python's logging at first depth
+                    Decorator._hijack_stdout_and_logging(log, name)
+
+                    # Inject log and UPPERCASE env vars into fn.__globals__
                     Decorator._inject_globals(fn, log)
 
                     try:
@@ -69,10 +80,10 @@ class Decorator:
                         if env:
                             Decorator._apply_env_overrides(log, name)
 
-                        # 2) Inject any cached env‐vars into kwargs
+                        # 2) Inject any cached env-vars into kwargs
                         Decorator._inject_env_kwargs(fn, kwargs, log)
 
-                        # 3) Build the “core” function (with timing + logging)
+                        # 3) Build the “core” function (with timing & logging)
                         core_fn = Decorator._build_core(fn, args, kwargs, timed, logged, callback, log)
 
                         # 4) Dispatch based on retry/safe flags:
@@ -94,8 +105,8 @@ class Decorator:
                         raise RuntimeError(f"[{name}] ❌ Crashed with: {e}") from e
 
                     finally:
-                        # Always restore original stdout/echo, regardless of success/failure
-                        Decorator._restore_stdout(name)
+                        # Always restore original stdout/echo/logging regardless of success/failure
+                        Decorator._restore_stdout_and_logging(name)
 
             return wrapper
 
@@ -109,50 +120,95 @@ class Decorator:
         Initialize the Loguru logger (once) and return it.
         """
         Logger.init_logger()
-        logger = Logger.get_loguru()
-        logger.debug("[Decorator] Logger initialized")
-        return logger
+        log = Logger.get_loguru()
+        log.debug("[Decorator] Logger initialized")
+        return log
 
     @staticmethod
-    def _hijack_stdout(log: Any, name: str):
+    def _hijack_stdout_and_logging(log: Any, name: str):
         """
-        Redirect builtins.print and click.echo to the logger, tracking nesting depth.
+        Redirect builtins.print, click.echo, and Python's root logger to Loguru,
+        tracking nesting depth on log_func._hijack_depth.
         """
         depth = getattr(log_func, "_hijack_depth", 0)
-        log.debug(f"[{name}] Hijack stdout (depth={depth})")
+        log.debug(f"[{name}] Hijack stdout & logging (depth={depth})")
 
         if depth == 0:
-            # Save originals
+            # ==== 1) Save originals for print & click.echo ====
             log_func._orig_print = builtins.print
             log_func._orig_echo = click.echo
 
-            # Override with logger.info
+            # Override builtins.print and click.echo to send to Loguru
             builtins.print = lambda *a, **k: log.info("{}", " ".join(map(str, a)))
             click.echo = lambda *a, **k: log.info("{}", " ".join(map(str, a)))
 
+            # ==== 2) Save original logging.root handlers & level ====
+            log_func._orig_log_handlers = logging.root.handlers.copy()
+            log_func._orig_log_level = logging.root.level
+
+            # ==== 3) Create an InterceptHandler that forwards stdlib logging to Loguru,
+            # capturing the originating function name (record.funcName) ====
+            class InterceptHandler(logging.Handler):
+                """
+                A logging.Handler that takes each LogRecord and re-emits it via Loguru,
+                including the original function name.
+                """
+                def emit(self, record: logging.LogRecord) -> None:
+                    try:
+                        level_no = record.levelno
+                        message = record.getMessage()
+                        origin_fn = record.funcName or "<unknown>"
+
+                        # Prepend origin function name to the message
+                        prefixed = f"[from {origin_fn}] {message}"
+
+                        # Calculate depth so Loguru reports the correct caller
+                        depth_offset = 2
+
+                        log.opt(depth=depth_offset, exception=record.exc_info).log(
+                            level_no, prefixed
+                        )
+                    except Exception:
+                        # If something breaks inside our handler, fallback to original print
+                        log_func._orig_print(f"[InterceptHandler] Failed to log record: {record}")
+
+            # ==== 4) Replace root logger's handlers & set level to NOTSET so everything propagates ====
+            logging.root.handlers = [InterceptHandler()]
+            logging.root.setLevel(logging.NOTSET)
+
+        # Increment nesting depth
         log_func._hijack_depth = depth + 1
         log.debug(f"[{name}] Hijack depth now {log_func._hijack_depth}")
 
     @staticmethod
-    def _restore_stdout(name: str):
+    def _restore_stdout_and_logging(name: str):
         """
-        Restore builtins.print and click.echo to their originals.
+        Restore builtins.print, click.echo, and Python's root logger to their originals
+        when exiting the outermost decorator context.
         """
         log = Logger.get_loguru()
-        # Decrement depth (default to 1 if not present)
         depth = getattr(log_func, "_hijack_depth", 1) - 1
-        log.debug(f"[{name}] Restore stdout (depth={depth})")
+        log.debug(f"[{name}] Restore stdout & logging (depth={depth})")
 
         if depth <= 0:
-            # At top level: restore originals and clean attributes
+            # ==== 1) Restore print & click.echo originals ====
             builtins.print = log_func._orig_print
             click.echo = log_func._orig_echo
+
+            # ==== 2) Restore logging.root handlers & level ====
+            logging.root.handlers = log_func._orig_log_handlers
+            logging.root.setLevel(log_func._orig_log_level)
+
+            # ==== 3) Clean up attributes on log_func ====
             delattr(log_func, "_hijack_depth")
             delattr(log_func, "_orig_print")
             delattr(log_func, "_orig_echo")
-            log.debug(f"[{name}] stdout/echo restored to originals")
+            delattr(log_func, "_orig_log_handlers")
+            delattr(log_func, "_orig_log_level")
+
+            log.debug(f"[{name}] stdout/echo/logging restored to originals")
         else:
-            # Still nested: just update the depth counter
+            # Still nested, just decrement depth counter
             log_func._hijack_depth = depth
             log.debug(f"[{name}] Hijack depth now {depth}")
 
@@ -171,7 +227,7 @@ class Decorator:
     @staticmethod
     def _inject_env_kwargs(fn: Callable, kwargs: dict, log: Any):
         """
-        Inject any cached env‐vars into kwargs if the function signature accepts them.
+        Inject any cached env-vars into kwargs if the function signature accepts them.
         """
         sig = inspect.signature(fn)
         env_cache = getattr(env, "_cache", {})  # defensive: if no _cache, use empty dict
@@ -197,9 +253,9 @@ class Decorator:
             }
 
             for k, v in injectables.items():
-                old = fn.__globals__.get(k, "<unset>")
+                old_val = fn.__globals__.get(k, "<unset>")
                 fn.__globals__[k] = v
-                log.debug(f"[{fn.__qualname__}] Overwrote global {k}: {old} -> {v}")
+                log.debug(f"[{fn.__qualname__}] Overwrote global {k}: {old_val} -> {v}")
 
         except AttributeError:
             log.warning(f"[{fn.__qualname__}] No __globals__ found; skipping global injection")
@@ -224,18 +280,17 @@ class Decorator:
         def _core():
             result = None
 
-            # Log entry with arguments
-            #if logged:
-                #log.info(f"[{fn.__qualname__}] Calling with args={args}, kwargs={kwargs}")
+            # Optional: log entry with arguments
+            if logged:
+                log.info(f"[{fn.__qualname__}] Calling with args={args}, kwargs={kwargs}")
 
-            # If we want timing, record start
+            # If timing is enabled, record execution time
             if timed:
                 start = time.perf_counter()
                 result = fn(*args, **kwargs)
                 duration = time.perf_counter() - start
                 log.success(f"[{fn.__qualname__}] Completed in {duration:.3f}s")
             else:
-                # No timing, just call
                 result = fn(*args, **kwargs)
 
             return result
@@ -260,6 +315,10 @@ class Decorator:
 
     @staticmethod
     def _execute_safe(fn: Callable, name: str, log: Any):
+        """
+        Run fn in “safe” mode: catch exceptions, log them, and return None.
+        If DEBUG_MODE=1, also print stack trace.
+        """
         try:
             return fn()
         except Exception as ex:
@@ -267,7 +326,7 @@ class Decorator:
             if env.get("DEBUG_MODE", required=False) == "1":
                 import traceback
                 traceback.print_exc()
-            return None  # Or sys.exit(1) if failure should be fatal
+            return None  # Return None instead of propagating
 
 
 def shim(fn: Optional[Callable] = None, **kwargs):

@@ -1,11 +1,15 @@
-import json
-import sys
-import time
-import threading
 import itertools
-import subprocess
+import json
 import logging
-from typing import Callable, Optional
+import os
+import subprocess
+import sys
+import threading
+import time
+from typing import Callable, Optional, List, Dict
+
+from util.milesprocess import run as miles_run  # <-- import the convenience alias
+from util.milessubprocess.cmd import CMD
 
 logger = logging.getLogger(__name__)
 
@@ -55,26 +59,28 @@ class CachedRuns:
 
 
 def run_az(
-    cmd: list[str],
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        cmd: List[str],
+        *,
+        capture_output: bool = True,
+        ignore_errors: Dict[str, List[str]] | None = None,
+        fallbacks: Dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False,
+        json_override: bool | None = None
 ) -> dict:
     """
-    Run Azure CLI commands with a spinner, caching, and default Python logging.
+    Run Azure CLI commands with a spinner, caching, authentication fallback, and Python logging.
 
     All defined variables:
-        resolved_cmd: list[str]
+        resolved_cmd: List[str]
         expect_json: bool
-        full_cmd: list[str]
+        full_cmd: List[str]
         full_cmd_str: str
-        proc: subprocess.Popen
+        completed: subprocess.CompletedProcess
         stdout: str
         stderr: str
         spinner_thread: threading.Thread
         spinner_stop_event: threading.Event
+        auth_retry_done: bool
 
     All defined sub-functions:
         _nuke
@@ -87,6 +93,7 @@ def run_az(
         _process_success
         _handle_subprocess_error
         _check_cached_runs
+        _auth_fallback
 
     Logic:
         1. Ensure Azure CLI dependency is present (once).
@@ -95,21 +102,25 @@ def run_az(
         4. Build the final command (adding '--output json' if needed).
         5. Check cache (unless force_refresh=True).
         6. Start a spinner thread.
-        7. Execute the subprocess and wait, showing spinner.
-        8. On success, parse JSON or return {}.
+        7. Execute the subprocess via MilesProcess.Runner.run(...) with global shell.
+        8. On success, parse JSON or print raw stdout & return {}.
         9. Store result in cache.
-        10. On failure, attempt fallbacks, ignore rules, or exit.
+       10. On failure, if 'Status_AccountUnusable' appears in stderr and we haven't retried auth yet:
+             a. Run `_auth_fallback()` to clear tokens and re-login.
+             b. Retry the original CLI command once.
+        11. If still failing or a different error, proceed to ignore/fallback rules or nuke.
     """
     # Defined variables
-    resolved_cmd: list[str]
+    resolved_cmd: List[str]
     expect_json: bool
-    full_cmd: list[str]
+    full_cmd: List[str]
     full_cmd_str: str
-    proc: subprocess.Popen
+    completed = None  # type: Optional[subprocess.CompletedProcess]
     stdout: str
     stderr: str
     spinner_thread: threading.Thread
     spinner_stop_event: threading.Event
+    auth_retry_done: bool = False  # ensure we reauth only once
 
     # Sub-functions
     def _nuke(reason: str, code: int = 99) -> None:
@@ -119,9 +130,9 @@ def run_az(
         logger.error(f"[run_az] ❌ {reason}")
         logger.error("[run_az] 💡 Try restarting your terminal or IDE to reload PATH.")
         logger.error(f"[run_az] ☢️  Nuking program in 10 seconds...")
-        local_spinner = itertools.cycle("|/-\\")
+        spinner = itertools.cycle("|/-\\")
         for i in range(20):
-            sys.stdout.write(f"\r[run_az] {next(local_spinner)} {10 - i // 2}s remaining... ")
+            sys.stdout.write(f"\r[run_az] {next(spinner)} {10 - i // 2}s remaining... ")
             sys.stdout.flush()
             time.sleep(0.5)
         print()
@@ -141,23 +152,27 @@ def run_az(
         except Exception as ex:
             _nuke(f"Azure CLI not detected: {ex}", code=98)
 
-    def _resolve_command_path(original_cmd: list[str]) -> list[str]:
+    def _resolve_command_path(original_cmd: List[str]) -> List[str]:
         """
         Resolve the actual path to the 'az' executable. If found, replace original_cmd[0].
         """
-        from util.milessubprocess.cmd import CMD
         resolved = CMD.which(original_cmd[0])
         if resolved:
             return [resolved] + original_cmd[1:]
         return original_cmd.copy()
 
-    def _should_expect_json(cmd_list: list[str], capture_flag: bool) -> bool:
+    def _should_expect_json(cmd_list: List[str], capture_flag: bool) -> bool:
         """
-        Determine whether to append '--output json' based on command and capture_output.
+        Determine whether to append '--output json' based on command and capture_output,
+        or honor json_override when provided.
         """
+        if json_override is not None:
+            return json_override
+
         joined = " ".join(cmd_list).lower()
         if not capture_flag:
             return False
+        # Don’t force JSON for interactive or login commands
         if "--use-device-code" in joined or " login" in joined or "account set" in joined:
             return False
         return True
@@ -181,60 +196,183 @@ def run_az(
         stop_event.set()
         thread.join()
 
-    def _execute_with_spinner(cmd_list: list[str], capture_flag: bool) -> tuple[str, str]:
+    def _execute_with_spinner(cmd_list: List[str], capture_flag: bool) -> tuple[str, str]:
         """
-        Launch the subprocess with Popen, show spinner while waiting, and return (stdout, stderr).
-
-        Returns:
-            stdout: str (decoded, possibly empty)
-            stderr: str (decoded, possibly empty)
+        Execute the command via MilesProcess.Runner.run(..., shell=True, force_global_shell=True),
+        while showing a spinner until it completes. Return (stdout, stderr) strings.
         """
         nonlocal spinner_thread, spinner_stop_event
-
-        stdout_pipe = subprocess.PIPE if capture_flag else None
-        stderr_pipe = subprocess.PIPE if capture_flag else None
-
-        try:
-            proc = subprocess.Popen(
-                cmd_list,
-                stdout=stdout_pipe,
-                stderr=stderr_pipe,
-                text=True,
-                shell=False
-            )
-        except FileNotFoundError as fnf:
-            _nuke(f"Failed to start Azure CLI process: {fnf}", code=99)
 
         spinner_stop_event = threading.Event()
         spinner_thread = threading.Thread(target=_start_spinner, args=(spinner_stop_event,), daemon=True)
         spinner_thread.start()
 
-        stdout_data, stderr_data = proc.communicate()
-        return stdout_data or "", stderr_data or ""
+        try:
+            # Force use of global shell on Windows: shell=True, force_global_shell=True
+            completed = miles_run(
+                cmd_list,
+                shell=True,
+                capture_output=capture_flag,
+                check=True,
+                text=True,
+                force_global_shell=True
+            )
+            stdout_data = completed.stdout or ""
+            stderr_data = completed.stderr or ""
+        except Exception:
+            # Stop spinner and re-raise so caller can handle
+            _stop_spinner(spinner_stop_event, spinner_thread)
+            raise
+
+        _stop_spinner(spinner_stop_event, spinner_thread)
+        return stdout_data, stderr_data
 
     def _process_success(raw_stdout: str, expect_flag: bool) -> dict:
         """
         Process the subprocess output on success. Parse JSON if expected.
+        If stdout is empty or not valid JSON, print raw stdout and return {}.
         """
         if not raw_stdout.strip():
-            if expect_flag:
-                _nuke("Azure CLI returned no stdout (possibly non-JSON or interactive mode)", code=97)
-            else:
-                logger.info("[run_az] ✅ Completed interactive command (no JSON expected).")
-                return {}
+            logger.warning("[run_az] ⚠️ Azure CLI returned empty stdout.")
+            return {}
+
         if expect_flag:
             try:
                 return json.loads(raw_stdout.strip())
             except json.JSONDecodeError as jde:
-                _nuke(f"Failed to parse JSON: {jde}", code=94)
+                logger.warning(f"[run_az] ⚠️ Expected JSON but got invalid output: {jde}")
+                print("[run_az] 🔍 Raw stdout:\n" + raw_stdout.strip())
+                return {}
+
         return {}
 
-    def _handle_subprocess_error(stderr_text: str, returncode: int, cmd_list: list[str]) -> dict:
+    def _auth_fallback() -> None:
+        nonlocal auth_retry_done
+        if auth_retry_done:
+            _nuke("[run_az] ⚠️ Authentication retry already attempted.", code=95)
+        auth_retry_done = True
+
+        # 1) Try Service Principal first (same as before)…
+        client_id = os.getenv("AZURE_CLIENT_ID")
+        client_secret = os.getenv("AZURE_CLIENT_SECRET")
+        tenant_id_env = os.getenv("AZURE_TENANT_ID")
+        if client_id and client_secret and tenant_id_env:
+            logger.info("[run_az][AuthFallback] Attempting Service Principal login.")
+            try:
+                # if SP-credentials exist, login non-interactively
+                miles_run(
+                    ["az", "login",
+                     "--service-principal",
+                     "--username", client_id,
+                     "--password", client_secret,
+                     "--tenant", tenant_id_env],
+                    shell=True,
+                    check=True,
+                    text=True,
+                    force_global_shell=True
+                )
+                return
+            except Exception as sp_ex:
+                logger.warning(f"[run_az][AuthFallback] SP login failed: {sp_ex}")
+                # fall through to device-code below
+
+        # 2) Clear any existing Azure CLI context
+        logger.warning("[run_az][AuthFallback] Clearing any existing Azure CLI login state…")
+        try:
+            miles_run(
+                ["az", "account", "clear"],
+                shell=True,
+                check=True,
+                text=True,
+                force_global_shell=True
+            )
+        except Exception as e:
+            logger.warning(f"[run_az][AuthFallback] 'az account clear' failed: {e}")
+
+        # 3) STOP the spinner (if it’s still running)
+        try:
+            spinner_stop_event.set()
+            spinner_thread.join()
+        except Exception:
+            pass
+
+        # 4) Now run device-code login WITHOUT capturing output, so that
+        #    the “https://microsoft.com/devicelogin” URL and code appear on screen.
+        logger.warning("[run_az][AuthFallback] Starting 'az login --use-device-code'…")
+        try:
+            subprocess.run(  # use subprocess.run directly so that stdout/stderr stream to console
+                ["az", "login", "--use-device-code"],
+                shell=True,
+                check=True,
+                text=True,
+                # force_global_shell=True is internal to miles_run; for subprocess.run we'll rely on shell=True
+            )
+        except Exception as e:
+            _nuke(f"[run_az][AuthFallback] 'az login --use-device-code' failed: {e}", code=96)
+
+        # 5) Once user has completed device-code flow, we can re-enable the spinner logic
+        #    or simply proceed to grab account info normally:
+
+        logger.warning("[run_az][AuthFallback] Fetching account details via 'az account show'…")
+        try:
+            acct_info = run_az(
+                ["az", "account", "show"],
+                capture_output=True,
+                ignore_errors=None,
+                fallbacks=None,
+                force_refresh=True,
+                json_override=True
+            )
+        except Exception as e:
+            _nuke(f"[run_az][AuthFallback] 'az account show' failed: {e}", code=97)
+
+        sub_id = acct_info.get("id")
+        tenant = acct_info.get("tenantId")
+        if not sub_id or not tenant:
+            _nuke("[run_az][AuthFallback] Could not read subscription ID or tenantId", code=98)
+
+        logger.info(f"[run_az][AuthFallback] Caching subscription={sub_id} tenant={tenant}")
+        CachedRuns.store_output("AZURE_SUBSCRIPTION_ID", sub_id, sub_id)
+        CachedRuns.store_output("AZURE_TENANT_ID", tenant, tenant)
+
+        # 6) Warm up Graph token (optional):
+        logger.warning("[run_az][AuthFallback] Warming up Graph token…")
+        try:
+            miles_run(
+                ["az", "account", "get-access-token", "--scope", "https://graph.microsoft.com/.default"],
+                shell=True,
+                check=True,
+                text=True,
+                force_global_shell=True
+            )
+        except Exception as e:
+            logger.warning(f"[run_az][AuthFallback] 'get-access-token' failed: {e}")
+
+    def _handle_subprocess_error(stderr_text: str, returncode: int, cmd_list: List[str]) -> dict:
         """
-        Handle errors by checking for fallbacks and ignore rules or nuke the process.
+        Handle errors by checking for built-in auth fallback, plus any user-provided
+        fallbacks or ignore rules; otherwise nuke.
         """
         lower_err = stderr_text.lower()
 
+        # 1) Built-in auth fallback on "accountunusable"
+        if "status_accountunusable" in lower_err or "accountunusable" in lower_err:
+            logger.warning("[run_az] ⚠️ Detected 'Status_AccountUnusable'. Invoking auth fallback…")
+            try:
+                _auth_fallback()
+                logger.info(f"[run_az] 🔁 Retrying original command: {' '.join(cmd_list)}")
+                return run_az(
+                    cmd_list,
+                    capture_output=capture_output,
+                    ignore_errors=ignore_errors,
+                    fallbacks=fallbacks,
+                    force_refresh=force_refresh,
+                    json_override=json_override
+                )
+            except Exception as fallback_ex:
+                _nuke(f"[run_az] Auth fallback failed: {fallback_ex}", code=95)
+
+        # 2) User-defined fallbacks
         if fallbacks:
             for key, handler in fallbacks.items():
                 if key.lower() in lower_err:
@@ -247,11 +385,13 @@ def run_az(
                             capture_output=capture_output,
                             ignore_errors=ignore_errors,
                             fallbacks=fallbacks,
-                            force_refresh=force_refresh
+                            force_refresh=force_refresh,
+                            json_override=json_override
                         )
                     except Exception as fallback_ex:
-                        _nuke(f"Fallback for '{key}' failed: {fallback_ex}", code=95)
+                        _nuke(f"[run_az] Fallback for '{key}' failed: {fallback_ex}", code=95)
 
+        # 3) ignore_errors rules
         if ignore_errors:
             for key, substrings in ignore_errors.items():
                 for substr in substrings:
@@ -259,9 +399,7 @@ def run_az(
                         logger.info(f"[run_az] ℹ️ Ignoring '{substr}' error for '{key}'. Continuing.")
                         return {}
 
-        _nuke(f"Azure CLI failed (code {returncode}): {' '.join(cmd_list)} ↳ {lower_err}", code=96)
-
-    def _check_cached_runs(full_cmd_list: list[str], force_refresh_flag: bool) -> Optional[dict]:
+    def _check_cached_runs(full_cmd_list: List[str], force_refresh_flag: bool) -> Optional[dict]:
         """
         Checks whether the command has already been run before (exact match on full_cmd_str).
         """
@@ -276,6 +414,7 @@ def run_az(
 
     resolved_cmd = _resolve_command_path(cmd)
     logger.info(f"[run_az] ▶ Running: {' '.join(resolved_cmd)}")
+
     expect_json = _should_expect_json(resolved_cmd, capture_output)
     full_cmd = resolved_cmd + (["--output", "json"] if expect_json else [])
     full_cmd_str = " ".join(full_cmd)
@@ -287,26 +426,25 @@ def run_az(
 
     try:
         stdout, stderr = _execute_with_spinner(full_cmd, capture_output)
-        _stop_spinner(spinner_stop_event, spinner_thread)
         result = _process_success(stdout, expect_json)
         entry_key = full_cmd_str
         CachedRuns.store_output(entry_key, full_cmd_str, result)
         return result
     except subprocess.CalledProcessError as ex:
-        _stop_spinner(spinner_stop_event, spinner_thread)
         return _handle_subprocess_error(ex.stderr or "", ex.returncode, full_cmd)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONVENIENCE FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def app_show(
-    project: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        project: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Show an existing Azure AD application by its appId or objectId.
@@ -339,31 +477,20 @@ def app_show(
 
 
 def app_create(
-    project: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        app_name: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Create a new Azure AD application with the given display name.
-
-    All defined variables:
-        cmd_list: list[str]
-        full_cmd_str: str
-        result: dict
-
-    Logic:
-        1. Validate 'project' is a non-empty string for display name.
-        2. Build the Azure CLI command for 'az ad app create'.
-        3. Invoke run_az with provided flags.
-        4. Return parsed JSON or {}.
     """
-    if not isinstance(project, str) or not project.strip():
+    if not isinstance(app_name, str) or not app_name.strip():
         raise ValueError("app_create: 'project' must be a non-empty string for display name")
 
-    cmd_list = ["az", "ad", "app", "create", "--display-name", project]
+    cmd_list = ["az", "ad", "app", "create", "--display-name", app_name]
     full_cmd_str = " ".join(cmd_list + (["--output", "json"] if capture_output else []))
 
     logger.info(f"[app_create] ▶ Running: {full_cmd_str}")
@@ -375,14 +502,13 @@ def app_create(
         force_refresh=force_refresh
     )
 
-
 def sp_show(
-    app_id: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        app_id: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Show an existing Azure AD service principal by its appId.
@@ -415,12 +541,12 @@ def sp_show(
 
 
 def sp_create(
-    app_id: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        app_id: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Create a new Azure AD service principal for the given appId.
@@ -451,14 +577,13 @@ def sp_create(
         force_refresh=force_refresh
     )
 
-
 def vault_show(
-    name: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        name: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Show an existing Azure Key Vault by its name.
@@ -491,12 +616,12 @@ def vault_show(
 
 
 def vault_create(
-    name: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        name: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Create a new Azure Key Vault with the given name.
@@ -529,12 +654,12 @@ def vault_create(
 
 
 def postgres_show(
-    name: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        name: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Show an existing Azure PostgreSQL Flexible Server by its name.
@@ -567,12 +692,12 @@ def postgres_show(
 
 
 def postgres_create(
-    name: str,
-    *,
-    capture_output: bool = True,
-    ignore_errors: dict[str, list[str]] | None = None,
-    fallbacks: dict[str, Callable[[], None]] | None = None,
-    force_refresh: bool = False
+        name: str,
+        *,
+        capture_output: bool = True,
+        ignore_errors: dict[str, list[str]] | None = None,
+        fallbacks: dict[str, Callable[[], None]] | None = None,
+        force_refresh: bool = False
 ) -> dict:
     """
     Create a new Azure PostgreSQL Flexible Server with the given name.
