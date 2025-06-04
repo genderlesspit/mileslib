@@ -1,5 +1,6 @@
 import itertools
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -180,7 +181,7 @@ class Docker:
         self.wsli = WSL.get_instance()
         self.base_cmd = ["-d", f"{self.wsli.distro}", "docker"]
         self.check_docker_ready()
-        log.success(f"WSL Instance Initialized: {self.uuid}")
+        log.success(f"Docker Instance Initialized: {self.uuid}")
 
     @classmethod
     def get_instance(cls):
@@ -195,15 +196,17 @@ class Docker:
         return self.wsli.run(real_cmd)
 
     def check_docker_ready(self):
+        cmd = self.base_cmd + ['version', '--format', '{{.Server.Version}}']
+
         try:
-            self.wsli.run(['version', '--format', '{{.Server.Version}}'])
+            self.wsli.run(cmd)
             return True
         except Exception:
             log.warning("Docker is not responding inside WSL ... Attempting to install ...")
             try:
-                self.wsli.install_docker()
-                self.run(['version', '--format', '{{.Server.Version}}'])
-            except: raise RuntimeError
+                self.wsli.looper(self.wsli.INSTALL_CMDS)
+                self.wsli.run(cmd)
+            except Exception: raise RuntimeError("Docker couldn't respond even after installation!")
 
             return False
 
@@ -253,6 +256,7 @@ class WSL:
         self.distro = distro
         self.check_distro(distro)
         self.run_cmd = self.base_cmd + ["-d", self.distro, "--exec", "bash", "-c"]
+        self.passwordless_sudo()
         log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}")
 
     @classmethod
@@ -374,12 +378,32 @@ class WSL:
         cleaned_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
         return "\n".join(cleaned_lines)
 
-    def run(self, cmd: list | None = None) -> str:
+    IGNORE_CODES = [9]
+
+    def run(self, cmd: list | None = None, ignore_codes: list[str] | None = None) -> str:
         if not isinstance(cmd, list):
             raise TypeError("Expected a list of command arguments.")
 
+        if ignore_codes is None:
+            ignore_codes = []
+        ignore_codes = self.IGNORE_CODES + ignore_codes
+
         real_cmd = self.base_cmd + cmd
         log.info(f"[WSL.run_command] Running: {' '.join(real_cmd)}")
+
+        # Spinner setup
+        spinner_running = True
+
+        def _spinner():
+            for c in itertools.cycle(r"\|/-"):
+                if not spinner_running:
+                    break
+                print(f"\r[WSL] Running... {c}", end="", flush=True)
+                time.sleep(0.1)
+            print("\r", end="", flush=True)  # Clean up line
+
+        spinner_thread = threading.Thread(target=_spinner)
+        spinner_thread.start()
 
         try:
             process = subprocess.Popen(
@@ -395,7 +419,7 @@ class WSL:
             process.stdout.close()
             process.wait()
 
-            if process.returncode != 0:
+            if process.returncode != 0 and (ignore_codes is None or process.returncode not in ignore_codes):
                 raise RuntimeError(f"WSL command failed with return code {process.returncode}")
 
             decoded_output = self._decode_wsl_output(output_bytes)
@@ -409,7 +433,11 @@ class WSL:
             log.exception("[WSL.run_command] Failed to execute command.")
             raise
 
-    install_cmds = [
+        finally:
+            spinner_running = False
+            spinner_thread.join()
+
+    INSTALL_CMDS = [
         # 1. Update package lists
         ["sudo", "apt-get", "update"],
 
@@ -420,12 +448,10 @@ class WSL:
         ["sudo", "mkdir", "-p", "/etc/apt/keyrings"],
 
         # 4. Download Docker GPG key
-        ["bash", "-c", (
-            "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | "
-            "sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
-        )],
+        ["bash", "-c",
+         "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.gpg > /dev/null"],
 
-        # 5. Add Docker repository
+            # 5. Add Docker repository
         ["bash", "-c", (
             'echo "deb [arch=$(dpkg --print-architecture) '
             'signed-by=/etc/apt/keyrings/docker.gpg] '
@@ -452,10 +478,26 @@ class WSL:
         ["sudo", "usermod", "-aG", "docker", "$USER"],
     ]
 
-    def install_docker(self):
-        for cmd in self.install_cmds:
-            try: self.run(cmd)
+    def looper(self, cmd_list: list, ignore_codes: list = None):
+        for cmd in cmd_list:
+            try: self.run(cmd, ignore_codes)
             except Exception as e: raise RuntimeError(e)
+
+    PASSWORDLESS_SUDO_CMDS = [
+        # Get the username dynamically
+        ["bash", "-c", "USER=$(whoami) && echo \"$USER ALL=(ALL) NOPASSWD:ALL\" | sudo tee /etc/sudoers.d/$USER"],
+        # Make the sudoers file secure
+        ["bash", "-c", "sudo chmod 440 /etc/sudoers.d/$(whoami)"],
+    ]
+
+    def passwordless_sudo(self):
+        key = f"{self.passwordless_sudo.__name__}"
+        val = os.getenv(key)
+        if val is None:
+            self.looper(self.PASSWORDLESS_SUDO_CMDS)
+            os.environ.setdefault(key, "True")
+        return
+
 
 def azure_cli(
         docker_img: DockerImage,
