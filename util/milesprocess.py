@@ -1,9 +1,10 @@
 import importlib.util
+import json
 import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Union, Optional, Dict
+from typing import Union, Optional, Dict, Any, List
 
 from util.milessubprocess.cmd import CMD
 from util.milessubprocess.external_dependency import ExternalDependency
@@ -15,18 +16,19 @@ class MilesProcess:
     class Runner:
         @staticmethod
         def run(
-            cmd: Union[str, list],
-            *,
-            shell: bool = False,
-            capture_output: bool = True,
-            check: bool = True,
-            text: bool = True,
-            env: Optional[Dict[str, str]] = None,
-            force_global_shell: bool = False,
-            cwd: Optional[Union[str, Path]] = None,
-        ) -> subprocess.CompletedProcess:
+                cmd: Union[str, List[str]],
+                *,
+                shell: bool = False,
+                capture_output: bool = True,
+                check: bool = True,
+                text: bool = True,
+                env: Optional[Dict[str, str]] = None,
+                force_global_shell: bool = False,
+                cwd: Optional[Union[str, Path]] = None,
+                expect_json: bool = False
+        ) -> Union[subprocess.CompletedProcess, Any]:
             """
-            Execute a command via CMD.run() with logging and type checks.
+            Execute a command via CMD.run() with logging, type checks, and optional JSON parsing.
 
             Args:
                 cmd: Command string or list.
@@ -37,13 +39,16 @@ class MilesProcess:
                 env: Custom environment variables.
                 force_global_shell: Force CMD to treat this as a global shell invocation on Windows.
                 cwd: Working directory for the subprocess.
+                expect_json: If True, parse stdout as JSON and return the resulting Python object.
 
             Returns:
-                CompletedProcess instance on success.
+                - If expect_json is False: CompletedProcess instance.
+                - If expect_json is True: Python object (dict, list, etc.) parsed from stdout.
 
             Raises:
                 TypeError: If argument types are invalid.
                 CalledProcessError: If the subprocess exits with non-zero (when check=True).
+                RuntimeError: If expect_json is True but stdout is not valid JSON.
             """
             # --- Type checks ---
             if not isinstance(cmd, (str, list)):
@@ -52,6 +57,8 @@ class MilesProcess:
                 raise TypeError(f"[Runner.run] 'env' must be dict or None, got {type(env).__name__}")
             if cwd is not None and not isinstance(cwd, (str, Path)):
                 raise TypeError(f"[Runner.run] 'cwd' must be str, pathlib.Path, or None, got {type(cwd).__name__}")
+            if not isinstance(expect_json, bool):
+                raise TypeError(f"[Runner.run] 'expect_json' must be bool, got {type(expect_json).__name__}")
 
             # Convert Path to str for CMD.run
             cwd_str: Optional[str]
@@ -62,6 +69,11 @@ class MilesProcess:
 
             # Log invocation at INFO level (minimal details)
             logger.info("Executing command: %r (cwd=%r)", cmd, cwd_str)
+
+            # If expect_json is True, enforce capture_output=True and text=True
+            if expect_json:
+                capture_output = True
+                text = True
 
             try:
                 result = CMD.run(
@@ -74,23 +86,24 @@ class MilesProcess:
                     force_global_shell=force_global_shell,
                     cwd=cwd_str,
                 )
-                # Log success only if returncode == 0
-                if result.returncode == 0:
-                    logger.info("Command succeeded (returncode=0)")
-                else:
-                    # This block is only reached if check=False
-                    logger.warning("Command completed with non-zero exit (returncode=%d)", result.returncode)
-                return result
-
-            except subprocess.CalledProcessError as exc:
-                # Detailed failure logging at ERROR level
-                logger.error(
-                    "Command failed (returncode=%d). cmd=%r%s",
-                    exc.returncode,
-                    cmd,
-                    f", stderr={exc.stderr!r}" if exc.stderr else ""
-                )
+            except subprocess.CalledProcessError:
+                # CMD.run already logs and raises; just re-raise here
                 raise
+
+            # If JSON is expected, attempt to parse stdout
+            if expect_json:
+                stdout_text = result.stdout or ""
+                try:
+                    parsed = json.loads(stdout_text)
+                except json.JSONDecodeError as ex:
+                    logger.error("Failed to parse JSON from stdout: %r", stdout_text)
+                    raise RuntimeError(f"[Runner.run] Expected JSON output but got: {stdout_text!r}") from ex
+
+                logger.info("Parsed JSON successfully")
+                return parsed
+
+            # Otherwise, return the raw CompletedProcess
+            return result
 
     class Dependency:
         @staticmethod

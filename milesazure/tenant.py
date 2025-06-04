@@ -1,5 +1,6 @@
 # tenant.py
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -595,9 +596,34 @@ class AzureUser:
 
         # Validate user type
         if user_type.lower() != "user":
-            raise RuntimeError(
-                f"[AzureUser] ❌ Expected a user identity but got '{user_type}'. Please run `az logout`."
+            logger.warning(
+                f"[AzureUser] ❌ Expected a user identity but got '{user_type}'. Running `az logout`."
             )
+            # Interactive device-code login
+            logger.warning("[run_az][AuthFallback] Starting 'az login --use-device-code'…")
+            try:
+                subprocess.run(
+                    ["az", "login", "--use-device-code"],
+                    shell=True,
+                    check=True,
+                    text=True
+                )
+            except Exception as e:
+                raise RuntimeError(f"[AzureUser][AuthFallback] 'az login --use-device-code' failed: {e}")
+
+            # Fetch account details
+            logger.warning("[AzureUser][AuthFallback] Fetching account details via 'az account show'…")
+            try:
+                acct_info = run_az(
+                    ["az", "account", "show"],
+                    capture_output=True,
+                    ignore_errors=None,
+                    fallbacks=None,
+                    force_refresh=True,
+                    json_override=True
+                )
+            except Exception as e:
+                raise RuntimeError(f"[run_az][AuthFallback] 'az account show' failed: {e}")
 
         # Final tenant/sub checks
         if actual_tenant != expected_tenant:

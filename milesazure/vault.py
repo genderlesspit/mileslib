@@ -1,19 +1,22 @@
 import logging
-import string
 import secrets as _secrets
-from typing import Dict, Any, Optional, List, Union
+import string
+from typing import Dict, Any, Optional, List
 
-from azure.identity import DefaultAzureCredential, ClientSecretCredential
+from azure.core.credentials import TokenCredential
 from azure.keyvault.secrets import SecretClient
 
+import milesazure.run as run
 import util
 from context.cache import Cache
-from milesazure.tenant import AzureSubscription
-from milesazure.tenant import AzureResourceGroup
+from context.milescontext import cache
 from milesazure.client import AzureClient
 from milesazure.run import run_az
+from milesazure.tenant import AzureResourceGroup
+from milesazure.tenant import AzureSubscription
 
 logger = logging.getLogger(__name__)
+
 
 class Secrets:
     """
@@ -37,31 +40,14 @@ class Secrets:
         return sanny
 
     @staticmethod
-    def _get_credential(project: str) -> DefaultAzureCredential | ClientSecretCredential:
-        """
-        Choose Azure credential: prefer ClientSecretCredential if all Azure IDs/secrets are cached,
-        else fallback to DefaultAzureCredential.
-        Args:
-            project (str): Project name.
-        Returns:
-            DefaultAzureCredential or ClientSecretCredential
-        """
-        if not isinstance(project, str):
-            raise TypeError("Secrets._get_credential: project must be a string")
-
-        tenant_id = Cache.get(project, "AZURE_TENANT_ID")
-        client_id = Cache.get(project, "AZURE_CLIENT_ID")
-        client_secret = Cache.temp_get(project, "AZURE_CLIENT_SECRET") or Cache.get(project, "AZURE_CLIENT_SECRET")
-
-        if tenant_id and client_id and client_secret:
-            logger.debug("[Secrets] Using ClientSecretCredential for project '%s'.", project)
-            return ClientSecretCredential(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
-
-        logger.debug("[Secrets] Falling back to DefaultAzureCredential for project '%s'.", project)
-        return DefaultAzureCredential()
+    def _test_secrets(project: str):
+        key, value = ("test", "test")
+        if Secrets.has(project, key) is False:
+            Secrets.set(project, key, value)
+        Secrets.get(project, key)
 
     @staticmethod
-    def load_vault(project: Optional[str] = None) -> SecretClient:
+    def load_vault(project: Optional[str] = None) -> str:
         """
         Instantiate or return a SecretClient for the project's Key Vault.
         Args:
@@ -75,104 +61,72 @@ class Secrets:
             project = Cache.get("global", "selected_project_name")
         if not project:
             raise RuntimeError("Secrets.load_vault: no project specified or selected")
+        try: vault_name = cache.get(project, "VAULT_NAME", VaultSetup.get_vault(project)["VAULT_NAME"])
+        except Exception as e: raise RuntimeError(f"Vault loading failed!: {e}")
 
-        vault_uri = Cache.get(project, "VAULT_URI")
-        if not vault_uri:
-            logger.warning("[Secrets] VAULT_URI missing; creating vault for project '%s'.", project)
-            kv_meta = VaultSetup.get_vault(project)
-            vault_uri = kv_meta.get("VAULT_URI", "")
-            if not isinstance(vault_uri, str) or not vault_uri:
-                raise RuntimeError(f"Secrets.load_vault: invalid VAULT_URI returned for project '{project}'")
+        if Secrets.vault_tested is False:
+            Secrets._test_secrets(project)
+            logger.info("Vault connection works! Thank god.")
 
-        try:
-            credential = Secrets._get_credential(project)
-            client = SecretClient(vault_url=vault_uri, credential=credential)
-            return client
-        except Exception as e:
-            raise RuntimeError(f"Secrets.load_vault: failed to load Key Vault client for '{project}': {e}")
+        return vault_name
 
     @staticmethod
-    def store(name: str, value: str, project: str) -> None:
+    def set(namespace: str, name: str, value: str) -> None:
         """
         Persist a secret to Azure Key Vault and cache it in memory.
         Args:
+            namespace (str): Project name.
             name (str): Secret name (no project prefix).
             value (str): Secret value.
-            project (str): Project name.
         Raises:
             RuntimeError: On failure to store.
         """
-        if not all(isinstance(x, str) for x in (name, value, project)):
+        if not all(isinstance(x, str) for x in (name, value, namespace)):
             raise TypeError("Secrets.store: name, value, and project must be strings")
 
-        raw_key = f"{project}.{name}"
+        raw_key = f"{namespace}-{name}"
         secret_key = Secrets.sanitize(raw_key)
+        vault_name = Secrets.load_vault(namespace)
 
         try:
-            client = Secrets.load_vault(project)
-            client.set_secret(secret_key, value)
-            Secrets._cache[secret_key] = value
-            logger.info("[Secrets] Stored secret '%s' in Key Vault", secret_key)
+            run.set_secret(vault_name, name, value)
         except Exception as e:
             raise RuntimeError(f"Secrets.store: failed to store secret '{secret_key}': {e}")
 
     @staticmethod
-    def set(name: str, value: str, project: str, persist: bool = False) -> None:
-        """
-        Cache a secret locally and optionally persist to Azure Key Vault.
-        Args:
-            name (str): Secret name.
-            value (str): Secret value.
-            project (str): Project name.
-            persist (bool): If True, also store in Key Vault.
-        Raises:
-            TypeError: If arguments are not strings.
-        """
-        if not all(isinstance(x, str) for x in (name, value, project)):
-            raise TypeError("Secrets.set: name, value, and project must be strings")
-
-        raw_key = f"{project}.{name}"
-        secret_key = Secrets.sanitize(raw_key)
-
-        Secrets._cache[secret_key] = value
-        logger.debug("[Secrets] Cached secret '%s'.", secret_key)
-
-        if persist:
-            Secrets.store(name, value, project)
-
-    @staticmethod
-    def has(name: str, project: str) -> bool:
+    def has(namespace: str, name: str) -> bool | None:
         """
         Check if a secret exists in local cache or in Key Vault.
         Args:
+            namespace (str): Project name.
             name (str): Secret name.
-            project (str): Project name.
         Returns:
             bool: True if secret exists.
         """
-        if not all(isinstance(x, str) for x in (name, project)):
+        if not all(isinstance(x, str) for x in (name, namespace)):
             raise TypeError("Secrets.has: name and project must be strings")
 
-        raw_key = f"{project}.{name}"
+        raw_key = f"{namespace}_{name}"
         secret_key = Secrets.sanitize(raw_key)
+        vault_name = Secrets.load_vault(namespace)
 
         if secret_key in Secrets._cache:
             return True
 
         try:
-            client = Secrets.load_vault(project)
-            client.get_secret(secret_key)
-            return True
-        except Exception:
+            sec = Secrets.get(namespace, name)
+            if sec is not None: return True
+        except Exception as e:
+            logger.warning(f"Could not find secret!: {e}")
             return False
 
     @staticmethod
-    def get(name: str, project: str, required: bool = True, store: bool = True) -> Optional[str]:
+    def get(namespace: str, name: str, required: bool = True, store: bool = True) -> Optional[str]:
         """
         Retrieve a secret from cache or Key Vault.
         Args:
             name (str): Secret name.
-            project (str): Project name.
+            namespace (str): Project name.
             required (bool): If True, raise if not found.
             store (bool): If True, cache retrieved value.
         Returns:
@@ -180,11 +134,12 @@ class Secrets:
         Raises:
             RuntimeError: If required and secret not found.
         """
-        if not all(isinstance(x, str) for x in (name, project)):
+        if not all(isinstance(x, str) for x in (name, namespace)):
             raise TypeError("Secrets.get: name and project must be strings")
 
-        raw_key = f"{project}.{name}"
+        raw_key = f"{namespace}_{name}"
         secret_key = Secrets.sanitize(raw_key)
+        vault_name = Secrets.load_vault(namespace)
 
         if secret_key in Secrets._cache:
             val = Secrets._cache[secret_key]
@@ -193,9 +148,8 @@ class Secrets:
             return val
 
         try:
-            client = Secrets.load_vault(project)
-            sec = client.get_secret(secret_key)
-            val = sec.value
+            sec = run.show_secret(vault_name, name)
+            val = sec[""]
             if store:
                 Secrets._cache[secret_key] = val
                 logger.debug("[Secrets] Retrieved secret '%s' from Key Vault", secret_key)
@@ -205,73 +159,6 @@ class Secrets:
                 raise RuntimeError(f"Secrets.get: could not find secret '{secret_key}'")
             return None
 
-    @staticmethod
-    def get_list(project: str) -> List[str]:
-        """
-        List names of all secrets for a project in Key Vault.
-        Args:
-            project (str): Project name.
-        Returns:
-            List[str]: List of secret names (including project prefix).
-        """
-        if not isinstance(project, str):
-            raise TypeError("Secrets.get_list: project must be a string")
-
-        client = Secrets.load_vault(project)
-        prefix = f"{project}."
-        names: List[str] = []
-        for prop in client.list_properties_of_secrets():
-            if prop.name.startswith(prefix):
-                names.append(prop.name)
-        return names
-
-    @staticmethod
-    def make_list(project: str) -> Dict[str, str]:
-        """
-        Return all secrets cached in-memory for a project.
-        Args:
-            project (str): Project name.
-        Returns:
-            Dict[str, str]: Mapping from secret name to value.
-        """
-        if not isinstance(project, str):
-            raise TypeError("Secrets.make_list: project must be a string")
-
-        prefix = f"{project}."
-        return {
-            key[len(prefix):]: val
-            for key, val in Secrets._cache.items()
-            if key.startswith(prefix)
-        }
-
-    @staticmethod
-    def preload_cache(secrets: Dict[str, str], project: str) -> None:
-        """
-        Bulk load secrets into in-memory cache without persisting.
-        Args:
-            secrets (Dict[str, str]): Mapping of name to value.
-            project (str): Project name.
-        Raises:
-            TypeError: If secret keys/values are not strings.
-        """
-        if not isinstance(secrets, dict) or not isinstance(project, str):
-            raise TypeError("Secrets.preload_cache: arguments must be (dict, str)")
-        for k, v in secrets.items():
-            if not isinstance(k, str) or not isinstance(v, str):
-                raise TypeError("Secrets.preload_cache: keys and values must be strings")
-            secret_key = Secrets.sanitize(f"{project}.{k}")
-            Secrets._cache[secret_key] = v
-        logger.info("[Secrets] Preloaded %d secrets into cache for project '%s'.", len(secrets), project)
-
-    @staticmethod
-    def clear_cache() -> None:
-        """
-        Clear all in-memory secret cache.
-        """
-        Secrets._cache.clear()
-        logger.info("[Secrets] Cleared all secrets from in-memory cache.")
-
-
 class Passwords:
     """
     Generate, validate, and manage passwords via Secrets.
@@ -279,12 +166,12 @@ class Passwords:
 
     @staticmethod
     def generate_password(
-        length: int = 16,
-        min_length: int = 8,
-        use_uppercase: bool = True,
-        use_lowercase: bool = True,
-        use_digits: bool = True,
-        use_special_chars: bool = True
+            length: int = 16,
+            min_length: int = 8,
+            use_uppercase: bool = True,
+            use_lowercase: bool = True,
+            use_digits: bool = True,
+            use_special_chars: bool = True
     ) -> str:
         """
         Create a random password meeting complexity requirements.
@@ -373,7 +260,7 @@ class Passwords:
             raise TypeError("Passwords.get: length must be an integer")
 
         logger.debug("[Passwords] Attempting to retrieve password '%s' for project '%s'.", name, project)
-        existing = Secrets.get(name, project, required=False, store=True)
+        existing = Secrets.get(project, name, required=False, store=True)
         if existing and Passwords.validate_password(existing):
             logger.info("[Passwords] Password '%s' retrieved from vault.", name)
             return existing
@@ -441,10 +328,10 @@ class VaultSetup:
 
         @staticmethod
         def create_vault(
-            vault_name: str,
-            resource_group: str,
-            location: str,
-            subscription_id: str
+                vault_name: str,
+                resource_group: str,
+                location: str,
+                subscription_id: str
         ) -> Dict[str, Any]:
             """
             Use `az keyvault create` to create a new Key Vault with RBAC authorization.
@@ -579,10 +466,10 @@ class VaultSetup:
         )
 
         return {
-            "VAULT_NAME":     name_val,
-            "VAULT_URI":      uri_val,
+            "VAULT_NAME": name_val,
+            "VAULT_URI": uri_val,
             "VAULT_LOCATION": location_val,
-            "VAULT_ID":       id_val,
+            "VAULT_ID": id_val,
         }
 
     @staticmethod
@@ -627,8 +514,7 @@ class VaultSetup:
             raise RuntimeError(f"[VaultSetup] Invalid VAULT_URI for project '{project}': {vault_uri}")
 
         try:
-            credential = Secrets._get_credential(project)
-            client = SecretClient(vault_url=vault_uri, credential=credential)
+            client = SecretClient(vault_url=vault_uri, credential=TokenCredential())
             logger.info("[VaultSetup] Created SecretClient for vault '%s'.", vault_uri)
             return client
         except Exception as ex:
@@ -685,7 +571,7 @@ def retrieve_secret(name: str, project: str, required: bool = True) -> Optional[
     """
     Wrapper around Secrets.get to retrieve a secret by name.
     """
-    return Secrets.get(name, project, required=required, store=True)
+    return Secrets.get(project, name, required=required, store=True)
 
 
 def list_local_secrets(project: str) -> Dict[str, str]:

@@ -153,24 +153,39 @@ class Decorator:
                 A logging.Handler that takes each LogRecord and re-emits it via Loguru,
                 including the original function name.
                 """
+
                 def emit(self, record: logging.LogRecord) -> None:
                     try:
+                        import inspect
+
                         level_no = record.levelno
                         message = record.getMessage()
-                        origin_fn = record.funcName or "<unknown>"
 
-                        # Prepend origin function name to the message
-                        prefixed = f"[from {origin_fn}] {message}"
+                        # Capture function call chain up to where log was triggered
+                        chain = []
+                        for frame in inspect.stack():
+                            name = frame.function
+                            path = frame.filename
 
-                        # Calculate depth so Loguru reports the correct caller
-                        depth_offset = 2
+                            # Skip loguru internals and decorator noise
+                            if "loguru" in path or "logging" in path or "decorator.py" in path:
+                                continue
 
-                        log.opt(depth=depth_offset, exception=record.exc_info).log(
-                            level_no, prefixed
+                            chain.append(name)
+
+                            # Optional early exit when you hit external file
+                            if "site-packages" not in path and "mileslib" in path:
+                                continue
+
+                        # x.y.z format (outermost → innermost)
+                        call_chain = ".".join(reversed(chain[:10]))  # You can adjust depth
+
+                        log.opt(depth=2, exception=record.exc_info).log(
+                            level_no, f"[from {call_chain}] {message}"
                         )
+
                     except Exception:
-                        # If something breaks inside our handler, fallback to original print
-                        log_func._orig_print(f"[InterceptHandler] Failed to log record: {record}")
+                        log_func._orig_print(f"[InterceptHandler] Failed to process: {record}")
 
             # ==== 4) Replace root logger's handlers & set level to NOTSET so everything propagates ====
             logging.root.handlers = [InterceptHandler()]

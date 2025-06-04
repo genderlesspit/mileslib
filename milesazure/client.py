@@ -249,7 +249,7 @@ class AzureClient:
 
         # Cache the app_id under the given project namespace
         try:
-            mc.cache.set(project, "app_id", new_app_id, include_in_cfg=project)
+            mc.cache.set(project, "AZURE_CLIENT_ID", new_app_id, include_in_cfg=project)
         except Exception as ex:
             logger.error(f"[AzureClient.create_app] Failed to cache app_id: {ex}", exc_info=True)
             raise
@@ -491,7 +491,7 @@ class AzureClient:
 
 
     @staticmethod
-    def secret(project: str) -> str:
+    def generate_secret(project: str) -> str:
         """
         Generate a one-time temporary client secret for the AAD app corresponding to `project`
         and cache it in mc.cache.temp under "<project>.client_secret". Returns the secret value.

@@ -1,6 +1,10 @@
 import milesazure
+import mileslib
+from context.milescontext import cache
 from milesazure import ids
-from milesazure.vault import VaultSetup
+from milesazure.ids import AzureServicePrincipal
+from milesazure.vault import VaultSetup, Secrets
+from pathlib import Path
 
 def init_azure(ctx):
     """
@@ -15,10 +19,6 @@ def init_azure(ctx):
     project = ctx.obj.get("project_name")
     if not project:
         raise ValueError("[init_azure] ctx.obj missing 'project_name'")
-
     print(f"[init_azure] Validating Azure identity for project: {project}")
-    ids.AzureIDs.validate_all(project)
-    ctx = ids.AzureServicePrincipal.get_context(project)
-    print("[Azure.ServicePrincipal] CTX Initialized: ", ctx)
-    milesazure.provision.Provision.provision_all(project)
+    AzureServicePrincipal(project)
 
