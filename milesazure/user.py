@@ -3,6 +3,8 @@ import json
 import logging
 import subprocess
 import time
+import uuid
+
 import requests
 from pathlib import Path
 import shutil
@@ -12,10 +14,7 @@ from fastapi import requests
 from context.decorator import mileslib
 from milesazure.tenant import tenant_id
 
-log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-
+from loguru import logger as log
 
 class ServicePrincipal:
     instance = None
@@ -171,21 +170,32 @@ class DockerImage:
 class Docker:
     instance = None
 
+    def __init__(self, wsli):
+        self.uuid = uuid.uuid4()
+        self.wsli = wsli
+        self.base_cmd = ["docker"]
+        self.check_docker_ready()
+        log.success(f"WSL Instance Initialized: {self.uuid}")
+
     @classmethod
     def get_instance(cls):
-        if shutil.which("docker") is None:
-            log.warning("❌ Docker is not installed or not in PATH! Attempting install...")
-            cls.install_docker()
-            if shutil.which("docker") is None:
-                raise RuntimeError("Docker installation failed or not available on PATH.")
-        else:
-            log.info("✅ Docker is installed and available")
-
-        Docker.check_daemon()
-
+        wsli = WSL.get_instance()
         if cls.instance is None:
-            cls.instance = cls()
+            cls.instance = cls(wsli)
         return cls.instance
+
+    def run(self, cmd: list):
+        if not isinstance(cmd, list): raise TypeError
+        real_cmd = self.base_cmd + cmd
+        return self.wsli.run(real_cmd)
+
+    def check_docker_ready(self):
+        try:
+            self.run(['version', '--format', '{{.Server.Version}}'])
+            return True
+        except Exception as e:
+            log.error("Docker is not responding inside WSL: ", e)
+            raise RuntimeError
 
     @staticmethod
     def build(dockerfile: Path, image_name: str):
@@ -222,39 +232,23 @@ class Docker:
             log.exception(f"[Docker.build] Exception: {e}")
             raise
 
-
-    @staticmethod
-    def install_docker():
-        if shutil.which("winget"):
-            log.info("winget is available.")
-        else:
-            log.error("winget is NOT on PATH!")
-
-        result = subprocess.run(
-            ["winget", "install", "--id", "Docker.DockerDesktop", "-e"],
-            check=False
-        )
-        print(f"Exit code: {result.returncode}")
-
-    @staticmethod
-    def check_daemon():
-        try:
-            subprocess.run(["docker", "info"], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            raise RuntimeError("❌ Docker daemon not running. Please start Docker Desktop.")
-
 class WSL:
     instance = None
+    def __init__(self, distro: str = "Ubuntu-22.04"):
+        self.uuid = uuid.uuid4()
+        self.distro = self.check_distro(distro)
+        self.base_cmd = ["wsl", "-d", self.distro, "--exec", "bash", "-c"]
+        log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}")
 
     @classmethod
     def get_instance(cls):
         if shutil.which("wsl") is None:
-            log.warning("❌ WSL is not installed or not in PATH! Attempting install...")
+            log.warning("WSL is not installed or not in PATH! Attempting install...")
             cls.install_wsl()
             if shutil.which("wsl") is None:
                 raise RuntimeError("WSL installation failed or not available on PATH.")
         else:
-            log.info("✅ WSL is installed and available")
+            log.success("WSL is installed and available")
 
         if cls.instance is None:
             cls.instance = cls()
@@ -264,34 +258,43 @@ class WSL:
     def install_wsl():
         try:
             result = subprocess.run(["wsl", "--install"], check=True)
-            log.info("✅ WSL install initiated.")
+            log.success("WSL install initiated.")
         except Exception as e:
-            log.exception("❌ WSL installation failed.")
+            log.error("WSL installation failed.")
             raise RuntimeError("WSL installation failed.") from e
 
     @staticmethod
-    def check_distro_ready():
-        # Minimal check to see if WSL2 is running
+    def check_distro(distro):
+        if not isinstance(distro, str): raise TypeError
         try:
-            subprocess.run(["wsl", "-e", "ls"], check=True, stdout=subprocess.DEVNULL)
-            return True
-        except Exception:
-            return False
+            checked_distro = subprocess.Popen(
+                ["wsl", "--list", "--verbose"],
+                stdout = subprocess.PIPE,
+                stderr = subprocess.STDOUT,
+                bufsize = 1,
+                universal_newlines = True
+            )
+            stdout = checked_distro.stdout
+            if distro not in stdout:
+                subprocess.Popen(
+                    ["wsl", "install", distro],
+                    stdout = subprocess.PIPE,
+                    stderr = subprocess.STDOUT,
+                    bufsize = 1,
+                    universal_newlines = True
+                )
+        except Exception: raise RuntimeError
 
-    @staticmethod
-    def run_command(cmd: str, distro: str | None = None):
+    def run(self, cmd: list | None = None):
         if WSL.instance is None:
             WSL.get_instance()
+        if not isinstance(cmd, list): raise TypeError
+        real_cmd = self.base_cmd + cmd
 
-        base_cmd = ["wsl"]
-        if distro:
-            base_cmd += ["-d", distro]
-        base_cmd += ["--exec", "bash", "-c", cmd]
-
-        log.info(f"[WSL.run_command] Running: {' '.join(base_cmd)}")
+        log.info(f"[WSL.run_command] Running: {' '.join(real_cmd)}")
         try:
             process = subprocess.Popen(
-                base_cmd,
+                real_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,
@@ -313,7 +316,6 @@ class WSL:
         except Exception as e:
             log.exception("[WSL.run_command] Failed to execute command.")
             raise
-
 
 def azure_cli(
     docker_img: DockerImage,
@@ -369,5 +371,6 @@ def azure_cli(
 if __name__ == "__main__":
     path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
     log.info("foobar")
-    DockerImage.get_instance(path, "foobar")
+    Docker.get_instance()
+    #DockerImage.get_instance(path, "foobar")
     #user = AzureUserLogin("foobar")
