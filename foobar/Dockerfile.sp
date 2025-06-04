@@ -1,0 +1,14 @@
+FROM mcr.microsoft.com/azure-cli
+
+ARG CLIENT_ID
+ARG CLIENT_SECRET
+ARG TENANT_ID
+
+ENV AZURE_CLIENT_ID=$CLIENT_ID
+ENV AZURE_CLIENT_SECRET=$CLIENT_SECRET
+ENV AZURE_TENANT_ID=$TENANT_ID
+
+RUN az login --service-principal \
+    --username $AZURE_CLIENT_ID \
+    --password $AZURE_CLIENT_SECRET \
+    --tenant $AZURE_TENANT_ID
