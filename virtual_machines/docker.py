@@ -27,7 +27,7 @@ class DockerImage:
         self.dockerfile_str = str(dockerfile.resolve())
         self.dockerfile_parent_path = str(self.dockerfile_path.parent.resolve())
         self.image_name = Sanitization.standard(self.dockerfile_str.replace("Docker.", ""))
-        self.base_cmd = #####
+        #self.base_cmd = #####
 
         if not self.find_image():
             Docker.build(self.dockerfile, self.image_name)
