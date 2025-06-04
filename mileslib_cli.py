@@ -5,6 +5,8 @@ from functools import wraps
 from pathlib import Path
 import click
 import mileslib as ml
+import util
+
 
 class ProjectAwareGroup(click.Group):
     def format_commands(self, ctx, formatter):
@@ -171,7 +173,8 @@ class CLI:
                 Raises:
                     click.Abort: On validation or milessubprocess failure.
                 """
-                ml.clim.init_project(ctx, project_name)
+                sanny = util.sanitization.Sanitization.standard(project_name)
+                ml.clim.init_project(ctx, sanny)
 
         class Project:
             @staticmethod

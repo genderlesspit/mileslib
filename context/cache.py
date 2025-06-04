@@ -75,6 +75,10 @@ class Cache:
             return val
 
         # 3. Not found in memory or .env → handle recall if provided
+
+        if recall and not isinstance(recall, str) and not callable(recall):
+            raise TypeError(f"[Cache.get] Invalid recall type: {type(recall)}")
+
         if isinstance(recall, str):
             with Cache._lock:
                 Cache._store[namespace][key] = recall
@@ -249,3 +253,83 @@ class Cache:
 
         print("TEMP MISS %s.%s", namespace, key)
         return None
+
+class CacheDict:
+    """
+    Structured dictionary interface over Cache.
+    Stores nested dictionaries as flattened dotted keys under a namespace.
+    """
+
+    @staticmethod
+    def set(namespace: str, data: dict, include_in_cfg: Optional[str] = None) -> None:
+        """
+        Flatten and store all key-value pairs from `data` under `namespace`.
+
+        Args:
+            namespace (str): Namespace for top-level cache.
+            data (dict): Dictionary to flatten and store.
+            include_in_cfg (str|None): If provided, include in config writeback.
+        """
+        def _flatten(d, prefix=""):
+            for k, v in d.items():
+                full_key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, dict):
+                    yield from _flatten(v, full_key)
+                else:
+                    yield full_key, str(v)
+
+        for key, value in _flatten(data):
+            Cache.set(namespace, key, value, include_in_cfg=include_in_cfg)
+
+    @staticmethod
+    def get(namespace: str, prefix: str = "") -> dict:
+        """
+        Retrieve all flattened key-value pairs under `namespace` and optional `prefix`,
+        then reconstruct into a nested dictionary.
+
+        Args:
+            namespace (str): Namespace used in Cache.
+            prefix (str): Optional prefix to filter and reconstruct keys.
+
+        Returns:
+            dict: Reconstructed nested dictionary.
+        """
+        result = {}
+
+        with Cache._lock:
+            ns_dict = Cache._store.get(namespace, {})
+            for key, value in ns_dict.items():
+                if prefix and not key.startswith(prefix + "."):
+                    continue
+
+                parts = key.split(".")
+                if prefix:
+                    parts = parts[len(prefix.split(".")):]  # strip the prefix from nesting
+
+                ref = result
+                for part in parts[:-1]:
+                    ref = ref.setdefault(part, {})
+                ref[parts[-1]] = value
+
+        return result
+
+    @staticmethod
+    def exists(namespace: str, key_path: str) -> bool:
+        """
+        Check if a chained key exists (e.g., "db.host") under a namespace.
+        """
+        return Cache.exists(namespace, key_path)
+
+    @staticmethod
+    def clear(namespace: str, prefix: str = "") -> None:
+        """
+        Remove all keys in the cache that start with prefix.
+        """
+        with Cache._lock:
+            ns_dict = Cache._store.get(namespace, {})
+            to_delete = [k for k in ns_dict if k.startswith(prefix)]
+            for k in to_delete:
+                Cache.clear(namespace, k)
+
+cache = Cache
+cache_dict = CacheDict

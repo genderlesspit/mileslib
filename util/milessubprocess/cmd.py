@@ -1,26 +1,29 @@
 # cmd.py
 
-import sys
+import logging
 import platform
 import shlex
 import subprocess
-from shutil import which as std_which
+import sys
 from pathlib import Path
+from shutil import which as std_which
 from typing import Union, List, Optional, Dict
+
+logger = logging.getLogger(__name__)
 
 
 class CMD:
     @staticmethod
     def run(
-        cmd: Union[str, List[str]],
-        *,
-        shell: bool = False,
-        capture_output: bool = True,
-        check: bool = True,
-        text: bool = True,
-        env: Optional[Dict[str, str]] = None,
-        force_global_shell: bool = False,
-        cwd: Union[None, str, Path] = None,
+            cmd: Union[str, List[str]],
+            *,
+            shell: bool = False,
+            capture_output: bool = True,
+            check: bool = True,
+            text: bool = True,
+            env: Optional[Dict[str, str]] = None,
+            force_global_shell: bool = False,
+            cwd: Optional[Union[str, Path]] = None,
     ) -> subprocess.CompletedProcess:
         """
         Runs a subprocess command. On Windows, if you pass a list where the first
@@ -32,48 +35,72 @@ class CMD:
         - `force_global_shell` is effectively ignored when `cmd` is already a list
           pointing to a .cmd/.bat file with spaces. subprocess.run will handle it.
         """
+        # --- Type checks ---
+        if not isinstance(cmd, (str, list)):
+            raise TypeError(f"[CMD.run] 'cmd' must be a str or list, got {type(cmd).__name__}")
+        if env is not None and not isinstance(env, dict):
+            raise TypeError(f"[CMD.run] 'env' must be a dict or None, got {type(env).__name__}")
+        if cwd is not None and not isinstance(cwd, (str, Path)):
+            raise TypeError(f"[CMD.run] 'cwd' must be str, pathlib.Path, or None, got {type(cwd).__name__}")
 
+        # Determine if running on Windows
         system_is_windows = (platform.system() == "Windows")
 
         # Convert cwd from Path to str if necessary
+        cwd_str: Optional[str]
         if isinstance(cwd, Path):
-            cwd = str(cwd)
+            cwd_str = str(cwd)
+        else:
+            cwd_str = cwd
 
-        # If cmd is a string and not using a shell, split it:
+        # If cmd is a string and not using a shell, split it
         if isinstance(cmd, str) and not shell:
             cmd = shlex.split(cmd)
 
-        # If cmd is a list on Windows and the first entry ends with .cmd/.bat,
-        # we do NOT wrap it again in ["cmd.exe", "/c"]. subprocess.run([...], shell=False)
-        # will directly invoke that .cmd file with correct quoting.
+        # On Windows, if cmd is a list and first entry ends with .cmd/.bat, leave it alone
         if isinstance(cmd, list) and system_is_windows:
             first = cmd[0].strip('"')
             if first.lower().endswith((".cmd", ".bat")):
-                # Guarantee it's a bare path (no extra cmd.exe). Leave it alone.
                 pass
 
-        # If caller explicitly asked for force_global_shell, we still wrap if it's not already wrapped:
+        # If force_global_shell requested on Windows, wrap in ["cmd.exe", "/c"] if not already wrapped
         if force_global_shell and system_is_windows:
-            # Only prepend if it's not already a cmd.exe wrapper
             if isinstance(cmd, list) and cmd[:2] != ["cmd.exe", "/c"]:
-                # But in most cases you can omit force_global_shell altogether.
                 cmd = ["cmd.exe", "/c"] + cmd
                 shell = False
 
-        # Logging
-        print(f"[CMD] Running: {cmd!r}")
-        if cwd:
-            print(f"[CMD]  └ cwd={cwd!r}")
+        # Logging the raw command invocation
+        logger.info("Running command: %r (cwd=%r)", cmd, cwd_str)
 
-        return subprocess.run(
-            cmd,
-            shell=shell,
-            capture_output=capture_output,
-            check=check,
-            text=text,
-            env=env,
-            cwd=cwd,
-        )
+        # Execute the subprocess
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=shell,
+                capture_output=capture_output,
+                check=check,
+                text=text,
+                env=env,
+                cwd=cwd_str,
+            )
+        except subprocess.CalledProcessError as exc:
+            # Log failure with stderr if available
+            stderr_text = exc.stderr if exc.stderr else ""
+            logger.error(
+                "Command failed (returncode=%d). cmd=%r%s",
+                exc.returncode,
+                cmd,
+                f", stderr={stderr_text!r}" if stderr_text else ""
+            )
+            raise
+
+        # Log success if returncode == 0, warning otherwise (only if check=False)
+        if result.returncode == 0:
+            logger.info("Command succeeded (returncode=0)")
+        else:
+            logger.warning("Command completed with non-zero exit (returncode=%d)", result.returncode)
+
+        return result
 
     @staticmethod
     def which(binary: str) -> Optional[str]:
@@ -116,10 +143,10 @@ class CMD:
 
     @staticmethod
     def pip_install(
-        package: Union[str, List[str]],
-        *,
-        upgrade: bool = False,
-        global_scope: bool = False,
+            package: Union[str, List[str]],
+            *,
+            upgrade: bool = False,
+            global_scope: bool = False,
     ) -> subprocess.CompletedProcess:
         """
         Installs one or more packages via pip.
@@ -141,7 +168,7 @@ class CMD:
         """
         python = CMD.system_python()
         pipx_installed = (
-            subprocess.run(["pipx", "--version"], capture_output=True).returncode == 0
+                subprocess.run(["pipx", "--version"], capture_output=True).returncode == 0
         )
         if not pipx_installed:
             print("[CMD] pipx not found; installing pipx via system Python...")

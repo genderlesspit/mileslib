@@ -89,9 +89,9 @@ class AzureBootstrap:
     class Vault:
         @staticmethod
         def store_secrets(app_id: str, secret: str, tenant_id: str):
-            bm.Secrets.set("aad-app-id", app_id)
-            bm.Secrets.set("aad-app-secret", secret)
-            bm.Secrets.set("aad-tenant-id", tenant_id)
+            bm.Secrets.set("aad-app-id", app_id, )
+            bm.Secrets.set("aad-app-secret", secret, )
+            bm.Secrets.set("aad-tenant-id", tenant_id, )
 
     class Registry:
         tenants_db = {}

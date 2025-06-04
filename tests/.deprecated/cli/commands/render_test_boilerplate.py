@@ -36,7 +36,7 @@ def render_boilerplate(classname: str, mainname: str = "Main", pdir=None, logger
 @click.pass_context
 def run(ctx, classname: str, mainname: str):
     """CLI wrapper for test boilerplate rendering."""
-    miles = ctx.obj.get("miles", )
+    miles = ctx.obj.get(, "miles"
     render_boilerplate(pdir=miles.pdir, classname=classname, mainname=mainname, logger=miles.logger if miles else None)
 
 if __name__ == "__main__":

@@ -72,7 +72,7 @@ class DatabaseSetup:
         resource_group = mc.cache.get(project,"RESOURCE_GROUP", AzureResourceGroup.get(project))
         region = mc.cache.get("AZURE_REGION", project) or "eastus"
         admin_user = "adminuser"
-        admin_pass = Secrets.get(f"{db_name}_DB_PASSWORD", project)
+        admin_pass = Secrets.get(project, f"{db_name}_DB_PASSWORD")
 
         logger.info(f"[DatabaseSetup] 🚀 Creating Azure PostgreSQL server: {db_name}")
         run_az(
@@ -161,7 +161,8 @@ class DatabaseSetup:
                 "DB_SERVER_NAME": db_name,
                 "DB_FQDN": fqdn,
                 "DB_LOCATION": location,
-                "DB_ID": server_id
+                "DB_ID": server_id,
+                "DB_ADMIN_USER": "adminuser"
             }
         except subprocess.CalledProcessError as e:
             # Even with ignore_errors, we guard in case unexpected errors slip through
