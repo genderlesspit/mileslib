@@ -1,23 +1,24 @@
-import asyncio
+import itertools
 import json
-import logging
+import shutil
 import subprocess
+import sys
+import threading
 import time
 import uuid
+from pathlib import Path
 
 import requests
-from pathlib import Path
-import shutil
-
+import select
 from fastapi import requests
+from loguru import logger as log
 
 from context.decorator import mileslib
-from milesazure.tenant import tenant_id
 
-from loguru import logger as log
 
 class ServicePrincipal:
     instance = None
+
     def __init__(self, token, version: str = "v1.0"):
         self.token = token
         self.version = version.strip("/")
@@ -43,7 +44,7 @@ class GraphAPI:
         return cls.instance
 
     @mileslib(retry=True)
-    def request(self, method, resource, query_parameters, headers, json_body = None):
+    def request(self, method, resource, query_parameters, headers, json_body=None):
         url = f"https://graph.microsoft.com/{self.version}/{resource}"
         if query_parameters:
             url += f"?{query_parameters}"
@@ -74,6 +75,7 @@ class GraphAPI:
             log.exception(f"[GraphAPI] Request failed: {e}")
             return None
 
+
 class AzureUserLogin:
     instance = None
 
@@ -91,8 +93,10 @@ class AzureUserLogin:
 
     def _login(self):
         log.info(f"[AzureUserLogin] Logging into Azure for project '{self.project}'...")
-        try: acct = azure_cli(["account", "show"], expect_json=True)
-        except Exception as e: acct = None
+        try:
+            acct = azure_cli(["account", "show"], expect_json=True)
+        except Exception as e:
+            acct = None
         if not acct:
             azure_cli(["login", "--tenant", self.tenant_id, "--use-device-code"])
 
@@ -167,35 +171,41 @@ class DockerImage:
         result = subprocess.run(cmd)
         return result.returncode
 
+
 class Docker:
     instance = None
 
-    def __init__(self, wsli):
+    def __init__(self):
         self.uuid = uuid.uuid4()
-        self.wsli = wsli
-        self.base_cmd = ["docker"]
+        self.wsli = WSL.get_instance()
+        self.base_cmd = ["-d", f"{self.wsli.distro}", "docker"]
         self.check_docker_ready()
         log.success(f"WSL Instance Initialized: {self.uuid}")
 
     @classmethod
     def get_instance(cls):
-        wsli = WSL.get_instance()
         if cls.instance is None:
-            cls.instance = cls(wsli)
+            cls.instance = cls()
         return cls.instance
 
     def run(self, cmd: list):
         if not isinstance(cmd, list): raise TypeError
         real_cmd = self.base_cmd + cmd
+        self.wsli.run(real_cmd)
         return self.wsli.run(real_cmd)
 
     def check_docker_ready(self):
         try:
-            self.run(['version', '--format', '{{.Server.Version}}'])
+            self.wsli.run(['version', '--format', '{{.Server.Version}}'])
             return True
-        except Exception as e:
-            log.error("Docker is not responding inside WSL: ", e)
-            raise RuntimeError
+        except Exception:
+            log.warning("Docker is not responding inside WSL ... Attempting to install ...")
+            try:
+                self.wsli.install_docker()
+                self.run(['version', '--format', '{{.Server.Version}}'])
+            except: raise RuntimeError
+
+            return False
 
     @staticmethod
     def build(dockerfile: Path, image_name: str):
@@ -232,12 +242,17 @@ class Docker:
             log.exception(f"[Docker.build] Exception: {e}")
             raise
 
+
 class WSL:
     instance = None
+
     def __init__(self, distro: str = "Ubuntu-22.04"):
+        self.path = r"C:\Windows\System32\wsl.exe"
         self.uuid = uuid.uuid4()
-        self.distro = self.check_distro(distro)
-        self.base_cmd = ["wsl", "-d", self.distro, "--exec", "bash", "-c"]
+        self.base_cmd = [self.path]
+        self.distro = distro
+        self.check_distro(distro)
+        self.run_cmd = self.base_cmd + ["-d", self.distro, "--exec", "bash", "-c"]
         log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}")
 
     @classmethod
@@ -263,65 +278,190 @@ class WSL:
             log.error("WSL installation failed.")
             raise RuntimeError("WSL installation failed.") from e
 
-    @staticmethod
-    def check_distro(distro):
-        if not isinstance(distro, str): raise TypeError
+    def check_distro(self, distro: str) -> str:
+        list_cmd = ["--list", "--quiet"]
+        install_cmd =["cmd.exe", "/c", "start", "cmd.exe", "/k", f"wsl --install -d {distro}"]
+
+        def check():
+            try:
+                listed_distros = self.run(list_cmd)
+                if distro in listed_distros:
+                    log.info(f"✅ Distro '{distro}' found.")
+                else:
+                    raise RuntimeError(f"❌ Distro '{distro}' not found.")
+            except subprocess.CalledProcessError as e:
+                log.error("WSL list command failed.")
+                raise RuntimeError("WSL list command failed.") from e
+
+        def _wait_for_enter(flag):
+            input()  # Blocks until Enter is pressed
+            flag["break"] = True
+
+        def install():
+            subprocess.Popen(install_cmd, shell=True)
+            log.info("⏳ Waiting for user to finish install... (press Enter to skip wait)")
+
+            flag = {"break": False}
+            threading.Thread(target=_wait_for_enter, args=(flag,), daemon=True).start()
+
+            spinner = itertools.cycle(["|", "/", "-", "\\"])
+
+            while True:
+                sys.stdout.write(f"\rInstalling... {next(spinner)} Still waiting for '{self.distro}'... ")
+                sys.stdout.flush()
+                time.sleep(1)
+
+                if flag["break"]:
+                    log.warning("⛔ Manual break triggered by Enter.")
+                    break
+
+                try:
+                    result = subprocess.run(
+                        list_cmd,
+                        capture_output=True, text=True, check=True, timeout=5
+                    )
+                    if self.distro.lower() in result.stdout.lower():
+                        print(f"\n✅ Distro '{self.distro}' is now installed.")
+                        break
+                except Exception:
+                    pass
+
+        if not isinstance(distro, str):
+            raise TypeError("distro must be a string")
+
         try:
-            checked_distro = subprocess.Popen(
-                ["wsl", "--list", "--verbose"],
-                stdout = subprocess.PIPE,
-                stderr = subprocess.STDOUT,
-                bufsize = 1,
-                universal_newlines = True
+            result = check()
+            log.info("WSL distros available:\n", result)
+            return distro
+        except RuntimeError:
+            time.sleep(1)
+            log.info("Continuing with Distro Installation...")
+            install()
+            return distro
+        except subprocess.CalledProcessError as e:
+            log.error("❌ Failed to check installed distros.")
+            log.error("stdout: {}", e.stdout)
+            log.error("stderr: {}", e.stderr)
+            raise RuntimeError("WSL --list failed. WSL may not be fully set up.") from e
+
+    def delete_distro(self):
+        """
+        Unregisters (deletes) the WSL distro specified in self.distro.
+        """
+        try:
+            self.run(
+                ["--unregister", self.distro],
             )
-            stdout = checked_distro.stdout
-            if distro not in stdout:
-                subprocess.Popen(
-                    ["wsl", "install", distro],
-                    stdout = subprocess.PIPE,
-                    stderr = subprocess.STDOUT,
-                    bufsize = 1,
-                    universal_newlines = True
-                )
-        except Exception: raise RuntimeError
+            log.success(f"✅ Distro '{self.distro}' has been deleted.")
+        except subprocess.CalledProcessError as e:
+            log.error(f"❌ Failed to delete distro '{self.distro}': {e.stderr.strip()}")
+            raise RuntimeError(f"Could not unregister distro '{self.distro}'") from e
 
-    def run(self, cmd: list | None = None):
-        if WSL.instance is None:
-            WSL.get_instance()
-        if not isinstance(cmd, list): raise TypeError
+    @staticmethod
+    def _decode_wsl_output(output_bytes: bytes) -> str:
+        """
+        Attempt to decode WSL command output.
+        - Tries UTF-8 first, falls back to UTF-16 (ignoring decode errors).
+        - Strips nulls, condenses double spaces, removes blank lines.
+        - Returns a single cleaned string (newline-separated).
+        """
+        try:
+            output = output_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            output = output_bytes.decode("utf-16", errors="ignore")
+
+        normalized = output.replace('\x00', '').replace('  ', ' ')
+        cleaned_lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+        return "\n".join(cleaned_lines)
+
+    def run(self, cmd: list | None = None) -> str:
+        if not isinstance(cmd, list):
+            raise TypeError("Expected a list of command arguments.")
+
         real_cmd = self.base_cmd + cmd
-
         log.info(f"[WSL.run_command] Running: {' '.join(real_cmd)}")
+
         try:
             process = subprocess.Popen(
                 real_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                bufsize=1,
-                universal_newlines=True
             )
 
             if process.stdout is None:
                 raise RuntimeError("WSL command stdout is None!")
 
-            for line in iter(process.stdout.readline, ''):
-                print(f"[WSL] {line.strip()}", flush=True)
-
+            output_bytes = process.stdout.read()
             process.stdout.close()
             process.wait()
 
             if process.returncode != 0:
                 raise RuntimeError(f"WSL command failed with return code {process.returncode}")
 
+            decoded_output = self._decode_wsl_output(output_bytes)
+
+            for line in decoded_output.splitlines():
+                print(f"[WSL] {line.strip()}", flush=True)
+
+            return decoded_output
+
         except Exception as e:
             log.exception("[WSL.run_command] Failed to execute command.")
             raise
 
+    install_cmds = [
+        # 1. Update package lists
+        ["sudo", "apt-get", "update"],
+
+        # 2. Install prerequisite packages
+        ["sudo", "apt-get", "install", "-y", "ca-certificates", "curl", "gnupg", "lsb-release"],
+
+        # 3. Create keyring directory
+        ["sudo", "mkdir", "-p", "/etc/apt/keyrings"],
+
+        # 4. Download Docker GPG key
+        ["bash", "-c", (
+            "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | "
+            "sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
+        )],
+
+        # 5. Add Docker repository
+        ["bash", "-c", (
+            'echo "deb [arch=$(dpkg --print-architecture) '
+            'signed-by=/etc/apt/keyrings/docker.gpg] '
+            'https://download.docker.com/linux/ubuntu '
+            '$(lsb_release -cs) stable" | '
+            'sudo tee /etc/apt/sources.list.d/docker.list > /dev/null'
+        )],
+
+        # 6. Update package lists again
+        ["sudo", "apt-get", "update"],
+
+        # 7. Install Docker components
+        ["sudo", "apt-get", "install", "-y",
+         "docker-ce", "docker-ce-cli", "containerd.io",
+         "docker-buildx-plugin", "docker-compose-plugin"],
+
+        # 8. Start Docker daemon in background
+        ["bash", "-c", "sudo nohup dockerd > /dev/null 2>&1 &"],
+
+        # 9. Add docker group (harmless if exists)
+        ["sudo", "groupadd", "docker"],
+
+        # 10. Add user to docker group
+        ["sudo", "usermod", "-aG", "docker", "$USER"],
+    ]
+
+    def install_docker(self):
+        for cmd in self.install_cmds:
+            try: self.run(cmd)
+            except Exception as e: raise RuntimeError(e)
+
 def azure_cli(
-    docker_img: DockerImage,
-    cmd: list[str],
-    expect_json: bool = True,
-    interactive: bool = False
+        docker_img: DockerImage,
+        cmd: list[str],
+        expect_json: bool = True,
+        interactive: bool = False
 ) -> dict | str | None:
     """
     Runs Azure CLI commands inside the provided Docker image.
@@ -368,9 +508,10 @@ def azure_cli(
 
     return stdout
 
+
 if __name__ == "__main__":
     path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
     log.info("foobar")
     Docker.get_instance()
-    #DockerImage.get_instance(path, "foobar")
-    #user = AzureUserLogin("foobar")
+    # DockerImage.get_instance(path, "foobar")
+    # user = AzureUserLogin("foobar")
