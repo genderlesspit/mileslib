@@ -162,11 +162,3 @@ def azure_cli(
             log.debug(f"[dockerized_azure_cli] Non-JSON output: {stdout}")
 
     return stdout
-
-
-if __name__ == "__main__":
-    path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
-    log.info("foobar")
-    Docker.get_instance()
-    # DockerImage.get_instance(path, "foobar")
-    # user = AzureUserLogin("foobar")
