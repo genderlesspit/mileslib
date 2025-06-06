@@ -1,4 +1,5 @@
 import itertools
+#import pty
 import shutil
 import subprocess
 import sys
@@ -19,17 +20,17 @@ class DockerImage:
             pathlib_path = str(pathlib_path)
         return pathlib_path.replace(":", "").replace("\\", "/").replace("C", "/mnt/c")
 
-    def __init__(self, dockerfile: Path):
+    def __init__(self, dockerfile: Path, rebuild: bool = True):
         self.uuid = uuid.uuid4()
         self.docker = Docker.get_instance()
         self.dockerfile_path = dockerfile
         self.dockerfile_str = self.to_wsl_path(self.dockerfile_path)
         self.dockerfile_parent_path = self.to_wsl_path(self.dockerfile_path.parent.resolve())
         self.image_name = self.dockerfile_path.name.replace("Dockerfile.", "")
-        self.base_cmd = ["run", "--rm", self.image_name]
+        self.base_cmd = ["run", "-i", "--rm", self.image_name]
         found_image = self.find_image()
-        if found_image is False: self.build()
-        self.run([])
+        if found_image is False or rebuild is True: self.build()
+        #self.run([])
         log.success(f"Docker Image Initialized: {self.uuid}, {self.image_name}")
 
     def find_image(self) -> bool:
@@ -49,7 +50,7 @@ class DockerImage:
             raise
 
     @classmethod
-    def get_instance(cls, dockerfile: Path):
+    def get_instance(cls, dockerfile: Path, rebuild: bool = True):
         log.debug(cls.instances)
         if not dockerfile.exists():
             raise FileNotFoundError(f"Dockerfile not found at: {dockerfile}")
@@ -59,16 +60,15 @@ class DockerImage:
 
         if image_name in cls.instances:
             return cls.instances[image_name]
-        instance = cls(dockerfile)
+        instance = cls(dockerfile, rebuild=rebuild)
         cls.instances[image_name] = instance
         return instance
 
     def run(self, cmd: list = None):
-        cmd = self.base_cmd + cmd
-        if not cmd: cmd = self.base_cmd
-        result = self.docker.run(cmd)
-        log.debug(result)
-
+        real_cmd = self.base_cmd + cmd
+        if not cmd: real_cmd = self.base_cmd
+        result = self.docker.run(real_cmd)
+        return result
 
 class Docker:
     instance = None
@@ -365,14 +365,5 @@ class WSL:
 
 
 if __name__ == "__main__":
-    # debug
-    path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
-    log.info("foobar")
+    path = Path.cwd() / "Dockerfile.foobar"
     inst = DockerImage.get_instance(path)
-    # inst.uninstall()
-    # WSL.get_instance()
-    # inst.uninstall()
-    # DockerImage.get_instance(path)
-    # Docker.get_instance()
-    # DockerImage.get_instance(path, "foobar")
-    # user = AzureUserLogin("foobar")
