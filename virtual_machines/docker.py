@@ -10,23 +10,28 @@ from codecs import ignore_errors
 from pathlib import Path
 
 from loguru import logger as log
-
 from util.sanitization import Sanitization
-
 
 class DockerImage:
     instances = {}
+    @staticmethod
+    def to_wsl_path(path: Path | str) -> str:
+        if isinstance(path, Path):
+            path = str(path)
+        return path.replace(":", "").replace("\\", "/").replace("C", "/mnt/c")
 
     def __init__(self, dockerfile: Path):
+        self.uuid = uuid.uuid4()
         self.docker = Docker.get_instance()
         self.dockerfile_path = dockerfile
-        self.dockerfile_str = str(dockerfile.name)
-        self.dockerfile_parent_path = str(self.dockerfile_path.parent.resolve())
-        self.image_name = self.dockerfile_str.replace("Dockerfile.", "")
-        self.base_cmd = ["docker", "run", "--rm", self.image_name]
-
-        if self.find_image is False:
-            self.build()
+        self.dockerfile_str = self.to_wsl_path(self.dockerfile_path)
+        self.dockerfile_parent_path = self.to_wsl_path(self.dockerfile_path.parent.resolve())
+        self.image_name = self.dockerfile_path.name.replace("Dockerfile.", "")
+        self.base_cmd = ["run", "--rm", self.image_name]
+        found_image = self.find_image()
+        if found_image is False: self.build()
+        self.run([])
+        log.success(f"Docker Image Initialized: {self.uuid}, {self.image_name}")
 
     def find_image(self) -> bool:
         cmd = ["images", "--format", "{{.Repository}}"]
@@ -37,7 +42,7 @@ class DockerImage:
         return True
 
     def build(self):
-        cmd = ["build", "-f", str(self.dockerfile_path), "-t", self.image_name, str(self.dockerfile_parent_path)]
+        cmd = ["build", "-f", str(self.dockerfile_str), "-t", self.image_name, str(self.dockerfile_parent_path)]
         try:
             log.debug(self.docker.run(cmd))
         except Exception as e:
@@ -59,7 +64,7 @@ class DockerImage:
         cls.instances[image_name] = instance
         return instance
 
-    def run(self, cmd: list):
+    def run(self, cmd: list = None):
         """
         Runs a container from the image with optional args.
         Args:
@@ -70,7 +75,9 @@ class DockerImage:
             Exit code of the process
         """
         cmd = self.base_cmd + cmd
+        if not cmd: cmd = self.base_cmd
         result = self.docker.run(cmd)
+        log.debug(result)
 
 class Docker:
     instance = None
@@ -91,7 +98,8 @@ class Docker:
 
     def run(self, cmd: list, ignore_codes: list = None):
         if not isinstance(cmd, list): raise TypeError
-        if not isinstance(ignore_codes, list): raise TypeError
+        if ignore_codes is not None:
+            if not isinstance(ignore_codes, list): raise TypeError
         real_cmd = self.base_cmd + cmd
         output = self.wsli.run(real_cmd, ignore_codes=ignore_codes)
         return output
@@ -158,7 +166,6 @@ class WSL:
                 "--", "bash",     # "--exec bash"
                 "-ic"                  # "-c" so we can pass a single command string
             ]
-        #self.passwordless_sudo()
         log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}, root: {root}")
 
     @classmethod
@@ -237,6 +244,7 @@ class WSL:
             raise TypeError("distro must be a string")
 
         try:
+            check()
             return distro
         except RuntimeError:
             time.sleep(1)
@@ -348,7 +356,7 @@ class WSL:
         looper_output = {}
         for i, cmd in enumerate(cmd_list):
             try:
-                log.info(f"[WSL.looper] Running command {i+1}/{len(cmd_list)}...")
+                log.debug(f"[WSL.looper] Running command {i+1}/{len(cmd_list)}...")
                 output = self.run(cmd, ignore_codes)
                 cmd_str = str(cmd)
                 looper_output[cmd_str] = output
@@ -358,55 +366,8 @@ class WSL:
         log.debug(looper_output)
         return looper_output
 
-    def _is_root(self) -> bool:
-        """
-        Returns True if running as root inside WSL.
-        """
-        try:
-            # run(["id", "-u"]) executes in WSL and returns "0" if root
-            output = self.run(["id", "-u"], ignore_codes=[], interactive=False).strip()
-            return output == "0"
-        except Exception:
-            return False
-
-    def passwordless_sudo(self):
-        """
-        Ensure that WSL’s default user is root and grant root NOPASSWD sudo.
-        Steps:
-          1. If we’re already root (id -u == 0), nothing to do.
-          2. If not root, try each command non‐interactively.
-             If sudo requires a password, self.run(...) will raise,
-             and we tell the user to do it manually.
-
-        All defined variables:
-            is_root: bool
-            cmd: list[str]
-        """
-        # 1. Check for root
-        if self._is_root():
-            log.info("[WSL.passwordless_sudo] Already running as root—skipping.")
-            return
-
-        # 2. Try to run each command without interactive stdin
-        for cmd in self.PASSWORDLESS_SUDO_CMDS:
-            try:
-                log.info(f"[WSL.passwordless_sudo] Attempting: {' '.join(cmd)}")
-                self.run(cmd, ignore_codes=[], interactive=False)
-            except RuntimeError as e:
-                log.error("[WSL.passwordless_sudo] Sudo needs a password or failed.")
-                # Bail out—tell the user exactly what to run by hand.
-                raise RuntimeError(
-                    "Unable to grant passwordless sudo. "
-                    "Please run these inside WSL as root:\n"
-                    f"    {cmd}"
-                ) from e
-
-        # If we made it here, all commands succeeded
-        os.environ["passwordless_sudo"] = "True"
-        log.success("[WSL.passwordless_sudo] Passwordless sudo configured.")
-        return
-
 if __name__ == "__main__":
+    #debug
     path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
     log.info("foobar")
     inst = DockerImage.get_instance(path)
