@@ -1,24 +1,23 @@
 import itertools
-import os
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import uuid
-from codecs import ignore_errors
 from pathlib import Path
 
 from loguru import logger as log
-from util.sanitization import Sanitization
+
 
 class DockerImage:
     instances = {}
+
     @staticmethod
-    def to_wsl_path(path: Path | str) -> str:
-        if isinstance(path, Path):
-            path = str(path)
-        return path.replace(":", "").replace("\\", "/").replace("C", "/mnt/c")
+    def to_wsl_path(pathlib_path: Path | str) -> str:
+        if isinstance(pathlib_path, Path):
+            pathlib_path = str(pathlib_path)
+        return pathlib_path.replace(":", "").replace("\\", "/").replace("C", "/mnt/c")
 
     def __init__(self, dockerfile: Path):
         self.uuid = uuid.uuid4()
@@ -65,19 +64,11 @@ class DockerImage:
         return instance
 
     def run(self, cmd: list = None):
-        """
-        Runs a container from the image with optional args.
-        Args:
-            *args: Commands to run inside the container (e.g. 'az', 'login')
-            interactive: If True, attaches stdin/stdout (like a shell)
-            remove: If True, auto-deletes container after run (--rm)
-        Returns:
-            Exit code of the process
-        """
         cmd = self.base_cmd + cmd
         if not cmd: cmd = self.base_cmd
         result = self.docker.run(cmd)
         log.debug(result)
+
 
 class Docker:
     instance = None
@@ -85,7 +76,7 @@ class Docker:
     def __init__(self):
         self.uuid = uuid.uuid4()
         self.wsli = WSL.get_instance()
-        #self.wsli_user = WSL.get_instance(root=False)
+        # self.wsli_user = WSL.get_instance(root=False)
         self.base_cmd = ["docker"]
         self.check_docker_ready()
         log.success(f"Docker Instance Initialized: {self.uuid}")
@@ -133,10 +124,13 @@ class Docker:
 
         self.wsli.looper(self.DOCKER_BOOT_CMDS)
 
-    def uninstall(self):
-        try: self.wsli.looper(self.DEBIAN_DOCKER_UNINSTALL_CMDS)
-        except Exception: raise RuntimeError("Error uninstalling Docker!")
-        sys.exit()
+    #def uninstall(self):
+    #    try:
+    #        self.wsli.looper(self.DEBIAN_DOCKER_UNINSTALL_CMDS)
+    #    except Exception:
+    #        raise RuntimeError("Error uninstalling Docker!")
+    #    sys.exit()
+
 
 class WSL:
     instances = {}
@@ -148,23 +142,23 @@ class WSL:
         log.debug("\n" + self.run(["--version"], debug=False))
         self.distro = distro
         self.check_distro(distro)
-        #reinit base_cmd
+        # reinit base_cmd
         if root is True:
             self.base_cmd = [
-                self.path,            # "C:\\Windows\\System32\\wsl.exe"
-                "-d", self.distro,    # "-d Debian"
-                "-u", "root",         # <— force root every time
-                "--", "bash",     # "--exec bash"
-                "-ic"                  # "-c" so we can pass a single command string
+                self.path,  # "C:\\Windows\\System32\\wsl.exe"
+                "-d", self.distro,  # "-d Debian"
+                "-u", "root",  # <— force root every time
+                "--", "bash",  # "--exec bash"
+                "-ic"  # "-c" so we can pass a single command string
             ]
             log.debug(self.run(['adduser --disabled-password --gecos "" mileslib'], ignore_codes=[1], debug=False))
         else:
             self.base_cmd = [
-                self.path,            # "C:\\Windows\\System32\\wsl.exe"
-                "-d", self.distro,    # "-d Debian"
-                "-u", "mileslib",         # <— force root every time
-                "--", "bash",     # "--exec bash"
-                "-ic"                  # "-c" so we can pass a single command string
+                self.path,  # "C:\\Windows\\System32\\wsl.exe"
+                "-d", self.distro,  # "-d Debian"
+                "-u", "mileslib",  # <— force root every time
+                "--", "bash",  # "--exec bash"
+                "-ic"  # "-c" so we can pass a single command string
             ]
         log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}, root: {root}")
 
@@ -186,7 +180,7 @@ class WSL:
     @staticmethod
     def install_wsl():
         try:
-            result = subprocess.run(["wsl", "--install"], check=True)
+            subprocess.run(["wsl", "--install"], check=True)
             log.success("WSL install initiated.")
         except Exception as e:
             log.error("WSL installation failed.")
@@ -194,18 +188,18 @@ class WSL:
 
     def check_distro(self, distro: str) -> str:
         list_cmd = ["--list", "--quiet"]
-        install_cmd =["cmd.exe", "/c", "start", "cmd.exe", "/k", f"wsl --install -d {distro}"]
+        install_cmd = ["cmd.exe", "/c", "start", "cmd.exe", "/k", f"wsl --install -d {distro}"]
 
         def check():
             try:
                 listed_distros = self.run(list_cmd)
                 if distro in listed_distros:
-                    log.info(f"✅ Distro '{distro}' found.")
+                    log.success(f"✅ Distro '{distro}' found.")
                 else:
                     raise RuntimeError(f"❌ Distro '{distro}' not found.")
-            except subprocess.CalledProcessError as e:
+            except subprocess.CalledProcessError as er:
                 log.error("WSL list command failed.")
-                raise RuntimeError("WSL list command failed.") from e
+                raise RuntimeError("WSL list command failed.") from er
 
         def _wait_for_enter(flag):
             input()  # Blocks until Enter is pressed
@@ -235,7 +229,7 @@ class WSL:
                         capture_output=True, text=True, check=True, timeout=5
                     )
                     if self.distro.lower() in result.stdout.lower():
-                        print(f"\n✅ Distro '{self.distro}' is now installed.")
+                        log.success(f"\n✅ Distro '{self.distro}' is now installed.")
                         break
                 except Exception:
                     pass
@@ -265,7 +259,7 @@ class WSL:
             self.run(
                 ["--unregister", self.distro],
             )
-            log.success(f"✅ Distro '{self.distro}' has been deleted.")
+            log.success(f"Distro '{self.distro}' has been deleted.")
         except subprocess.CalledProcessError as e:
             log.error(f"❌ Failed to delete distro '{self.distro}': {e.stderr.strip()}")
             raise RuntimeError(f"Could not unregister distro '{self.distro}'") from e
@@ -288,7 +282,7 @@ class WSL:
     IGNORE_CODES = [9]
     _apt_patch_attempted = False
 
-    def run(self, cmd: list, ignore_codes: list[int] | None = None, debug = True) -> str:
+    def run(self, cmd: list, ignore_codes: list[int] | None = None, debug=True) -> str | None:
         if not isinstance(cmd, list):
             raise TypeError("Expected a list of command arguments.")
 
@@ -311,6 +305,8 @@ class WSL:
         spinner_thread = threading.Thread(target=_spinner)
         spinner_thread.start()
 
+        process = None
+
         try:
             process = subprocess.Popen(
                 real_cmd,
@@ -318,7 +314,7 @@ class WSL:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-            #process.wait()
+            # process.wait()
             output_bytes, _ = process.communicate(timeout=300)
             decoded_output = self._decode_wsl_output(output_bytes)
 
@@ -338,13 +334,14 @@ class WSL:
             elif process.returncode != 0 and process.returncode not in ignore_codes:
                 raise
 
-            #for line in decoded_output.splitlines():
+            # for line in decoded_output.splitlines():
             if decoded_output == "": return ""
             if debug is True: log.debug(f"[WSL.run_command] Decoded output:\n{decoded_output!r}")
             return decoded_output
 
-        except Exception as e:
+        except Exception:
             log.exception("[WSL.run_command] Failed to execute command.")
+            log.error(process.stderr)
             raise
 
         finally:
@@ -356,7 +353,7 @@ class WSL:
         looper_output = {}
         for i, cmd in enumerate(cmd_list):
             try:
-                log.debug(f"[WSL.looper] Running command {i+1}/{len(cmd_list)}...")
+                log.debug(f"[WSL.looper] Running command {i + 1}/{len(cmd_list)}...")
                 output = self.run(cmd, ignore_codes)
                 cmd_str = str(cmd)
                 looper_output[cmd_str] = output
@@ -366,15 +363,16 @@ class WSL:
         log.debug(looper_output)
         return looper_output
 
+
 if __name__ == "__main__":
-    #debug
+    # debug
     path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
     log.info("foobar")
     inst = DockerImage.get_instance(path)
-    #inst.uninstall()
-    #WSL.get_instance()
-    #inst.uninstall()
-    #DockerImage.get_instance(path)
-    #Docker.get_instance()
+    # inst.uninstall()
+    # WSL.get_instance()
+    # inst.uninstall()
+    # DockerImage.get_instance(path)
+    # Docker.get_instance()
     # DockerImage.get_instance(path, "foobar")
     # user = AzureUserLogin("foobar")
