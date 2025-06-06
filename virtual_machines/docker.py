@@ -6,6 +6,7 @@ import sys
 import threading
 import time
 import uuid
+from codecs import ignore_errors
 from pathlib import Path
 
 from loguru import logger as log
@@ -17,66 +18,40 @@ class DockerImage:
     instances = {}
 
     def __init__(self, dockerfile: Path):
+        self.docker = Docker.get_instance()
         self.dockerfile_path = dockerfile
-        self.dockerfile_str = str(dockerfile.resolve())
+        self.dockerfile_str = str(dockerfile.name)
         self.dockerfile_parent_path = str(self.dockerfile_path.parent.resolve())
-        self.image_name = Sanitization.standard(self.dockerfile_str.replace("Docker.", ""))
-        #self.base_cmd = #####
+        self.image_name = self.dockerfile_str.replace("Dockerfile.", "")
+        self.base_cmd = ["docker", "run", "--rm", self.image_name]
 
-        if not self.find_image():
-            Docker.build(self.dockerfile, self.image_name)
+        if self.find_image is False:
+            self.build()
 
     def find_image(self) -> bool:
-        cmd = ["docker", "images", "--format", "{{.Repository}}", self.image_name]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            output = result.stdout.strip()
-            if result.returncode != 0 or not output:
-                log.warning(f"[DockerImage.find_image] Image '{self.image_name}' not found.")
-                return False
-            log.info(f"[DockerImage.find_image] Found image '{self.image_name}'.")
-            return True
-        except Exception as e:
-            log.error(f"[DockerImage.find_image] Error checking image: {e}")
+        cmd = ["images", "--format", "{{.Repository}}"]
+        log.info(f"Attempting to find image for {self.image_name}")
+        result = self.docker.run(cmd, ignore_codes=[1])
+        if self.image_name not in result:
             return False
+        return True
 
     def build(self):
-        cmd = ["docker", "build", "-f", self.dockerfile_path, "-t", self.image_name, self.dockerfile_parent_path]
-
-        log.info(f"[Docker.build] Running command: {' '.join(cmd)}")
+        cmd = ["build", "-f", str(self.dockerfile_path), "-t", self.image_name, str(self.dockerfile_parent_path)]
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=1,
-                universal_newlines=True
-            )
-
-            if process.stdout is None:
-                raise RuntimeError("Docker build stdout is None!")
-
-            for line in iter(process.stdout.readline, ''):
-                print(f"[Docker] {line.strip()}", flush=True)
-
-            process.stdout.close()
-            process.wait()
-
-            if process.returncode != 0:
-                raise RuntimeError(f"Docker build failed for image: {self.image_name}")
-
+            log.debug(self.docker.run(cmd))
         except Exception as e:
             log.exception(f"[Docker.build] Exception: {e}")
             raise
 
-
     @classmethod
     def get_instance(cls, dockerfile: Path):
+        log.debug(cls.instances)
         if not dockerfile.exists():
             raise FileNotFoundError(f"Dockerfile not found at: {dockerfile}")
 
         dockerfile_str = str(dockerfile.resolve())
-        image_name = Sanitization.standard(dockerfile_str.replace("Docker.", ""))
+        image_name = dockerfile_str.replace("Docker.", "")
 
         if image_name in cls.instances:
             return cls.instances[image_name]
@@ -95,7 +70,7 @@ class DockerImage:
             Exit code of the process
         """
         cmd = self.base_cmd + cmd
-        result = Docker.run(cmd)
+        result = self.docker.run(cmd)
 
 class Docker:
     instance = None
@@ -103,6 +78,7 @@ class Docker:
     def __init__(self):
         self.uuid = uuid.uuid4()
         self.wsli = WSL.get_instance()
+        #self.wsli_user = WSL.get_instance(root=False)
         self.base_cmd = ["docker"]
         self.check_docker_ready()
         log.success(f"Docker Instance Initialized: {self.uuid}")
@@ -113,60 +89,80 @@ class Docker:
             cls.instance = cls()
         return cls.instance
 
-    def run(self, cmd: list):
+    def run(self, cmd: list, ignore_codes: list = None):
         if not isinstance(cmd, list): raise TypeError
+        if not isinstance(ignore_codes, list): raise TypeError
         real_cmd = self.base_cmd + cmd
-        self.wsli.run(real_cmd)
-        return self.wsli.run(real_cmd)
+        output = self.wsli.run(real_cmd, ignore_codes=ignore_codes)
+        return output
+
+    INSTALL_DOCKER_COMMANDS = [
+        ["curl -fsSL https://get.docker.com -o get-docker.sh"],
+        ["sudo sh get-docker.sh"],
+        ["sudo usermod -aG docker mileslib"],
+        ["docker --version"],
+        ["docker compose version"]
+    ]
+    DOCKER_BOOT_CMDS = [
+        ["grep -q '\\-WSL2' /proc/version || exit 0"],
+        ['service docker status 2>&1 | grep -q "is not running"'],
+        ['sudo service docker start'],
+        ['docker info'],
+        ['docker run hello-world']
+    ]
 
     def check_docker_ready(self):
-        check_cmd = self.base_cmd + ['version', '--format', '{{.Server.Version}}']
-        output = self.wsli.run(check_cmd, ignore_codes=[127, 1])
+        check_cmd = self.base_cmd + ["version", "--format", "{{.Server.Version}}"]
+        output = self.wsli.run(check_cmd, ignore_codes=[127, 1], debug=True)
+
         if "command not found" in output.lower():
-            log.warning("Docker not found inside WSL. Installing...")
+            log.warning("Docker not found. Installing...")
             try:
-                self.wsli.looper(self.wsli.INSTALL_CMDS)
-                return True
-            except Exception:
-                raise RuntimeError("Error in docker installation process!")
-        if "docker daemon" in output.lower():
-            self.wsli.run(["bash", "-c", "pgrep dockerd || nohup dockerd > /var/log/dockerd.log 2>&1 &"])
-        for i in range(10):
-            try:
-                self.wsli.run(["docker", "version", "--format", "{{.Server.Version}}"], ignore_codes=[1], debug=False)
-                log.info("[Docker.check_docker_ready] Docker daemon is up!")
-                break
-            except RuntimeError:
-                log.debug(f"[Docker.check_docker_ready] Waiting for Docker daemon... attempt {i + 1}")
-                time.sleep(1)
-        else:
-            raise RuntimeError("Docker daemon failed to start in time.")
+                output = self.wsli.looper(self.INSTALL_DOCKER_COMMANDS, ignore_codes=[1])
+                log.debug(output)
+            except Exception as e:
+                raise RuntimeError(f"Docker install failed: {e}")
+
+        self.wsli.looper(self.DOCKER_BOOT_CMDS)
+
+    def uninstall(self):
+        try: self.wsli.looper(self.DEBIAN_DOCKER_UNINSTALL_CMDS)
+        except Exception: raise RuntimeError("Error uninstalling Docker!")
+        sys.exit()
 
 class WSL:
-    instance = None
+    instances = {}
 
-    def __init__(self, distro: str = "Debian"):
+    def __init__(self, distro: str = "Debian", root: bool = True):
         self.path = r"C:\Windows\System32\wsl.exe"
         self.uuid = uuid.uuid4()
         self.base_cmd = [self.path]
+        log.debug("\n" + self.run(["--version"], debug=False))
         self.distro = distro
         self.check_distro(distro)
-        self.run_cmd = self.base_cmd + ["-d", self.distro, "--exec", "bash", "-c"]
-
         #reinit base_cmd
-        self.make_default_root()
-        self.base_cmd = [
-            self.path,            # "C:\\Windows\\System32\\wsl.exe"
-            "-d", self.distro,    # "-d Debian"
-            "-u", "root",         # <— force root every time
-            "--exec", "bash",     # "--exec bash"
-            "-c"                  # "-c" so we can pass a single command string
-        ]
+        if root is True:
+            self.base_cmd = [
+                self.path,            # "C:\\Windows\\System32\\wsl.exe"
+                "-d", self.distro,    # "-d Debian"
+                "-u", "root",         # <— force root every time
+                "--", "bash",     # "--exec bash"
+                "-ic"                  # "-c" so we can pass a single command string
+            ]
+            log.debug(self.run(['adduser --disabled-password --gecos "" mileslib'], ignore_codes=[1], debug=False))
+        else:
+            self.base_cmd = [
+                self.path,            # "C:\\Windows\\System32\\wsl.exe"
+                "-d", self.distro,    # "-d Debian"
+                "-u", "mileslib",         # <— force root every time
+                "--", "bash",     # "--exec bash"
+                "-ic"                  # "-c" so we can pass a single command string
+            ]
         #self.passwordless_sudo()
-        log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}")
+        log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}, root: {root}")
 
     @classmethod
-    def get_instance(cls):
+    def get_instance(cls, root: bool = True):
         if shutil.which("wsl") is None:
             log.warning("WSL is not installed or not in PATH! Attempting install...")
             cls.install_wsl()
@@ -175,42 +171,10 @@ class WSL:
         else:
             log.success("WSL is installed and available")
 
-        if cls.instance is None:
-            cls.instance = cls()
-        return cls.instance
-
-    def make_default_root(self):
-        # 1. The two lines needed in /etc/wsl.conf:
-        conf_content = "[user]\ndefault = root\n"
-
-        # 2. Build a bash snippet that writes those lines into /etc/wsl.conf:
-        #    -e ensures that "\n" is interpreted as newline in bash
-        bash_cmd = f'echo -e "{conf_content}" > /etc/wsl.conf'
-
-        # 3. Build the Windows‐side command that runs bash_cmd as root:
-        cmd_write = [
-            self.path,        # "C:\\Windows\\System32\\wsl.exe"
-            "-d", self.distro,
-            "-u", "root",     # run bash as root, so no sudo prompt
-            "--exec", "bash", "-c", bash_cmd
-        ]
-
-        try:
-            subprocess.run(cmd_write, check=True)
-            log.info("[WSL.make_default_root] Wrote /etc/wsl.conf → next WSL launches as root.")
-        except subprocess.CalledProcessError as e:
-            log.error(f"[WSL.make_default_root] Failed to write /etc/wsl.conf: {e}")
-            raise
-
-        # 4. Immediately shut down all WSL distros so that wsl.conf takes effect:
-        #    'wsl.exe --shutdown' will stop the VM; next wsl call will restart with new settings.
-        cmd_shutdown = [self.path, "--shutdown"]
-        try:
-            subprocess.run(cmd_shutdown, check=True)
-            log.info("[WSL.make_default_root] WSL VM shut down. Next launch will respect /etc/wsl.conf.")
-        except subprocess.CalledProcessError as e:
-            log.error(f"[WSL.make_default_root] Failed to shut down WSL VM: {e}")
-            raise
+        root_str = str(root)
+        if root_str not in cls.instances:
+            cls.instances[root_str] = cls(root=root)
+        return cls.instances[root_str]
 
     @staticmethod
     def install_wsl():
@@ -360,8 +324,11 @@ class WSL:
                 else:
                     log.warning("apt-get returned 100, but continuing.")
 
+            if process.returncode == 1:
+                log.warning(decoded_output)
+
             elif process.returncode != 0 and process.returncode not in ignore_codes:
-                raise RuntimeError(f"WSL command failed with return code {process.returncode}")
+                raise
 
             #for line in decoded_output.splitlines():
             if decoded_output == "": return ""
@@ -377,27 +344,19 @@ class WSL:
             spinner_thread.join()
             print("\r", end="", flush=True)
 
-    INSTALL_CMDS = [
-        ["apt-get update"],
-        ["apt-get -o Dpkg::Progress-Fancy=1 install -y ca-certificates curl gnupg lsb-release"],
-        ["mkdir -p /etc/apt/keyrings"],
-        ["curl -fsSL https://download.docker.com/linux/debian/gpg -o /tmp/docker.gpg"],
-        ["gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg /tmp/docker.gpg"],
-        ["echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] "
-         "https://download.docker.com/linux/debian $(lsb_release -cs) stable\" "
-         "| tee /etc/apt/sources.list.d/docker.list > /dev/null"],
-        ["apt-get update"],
-        ["apt-get -o Dpkg::Progress-Fancy=1 install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin"],
-    ]
-
     def looper(self, cmd_list: list, ignore_codes: list = None):
+        looper_output = {}
         for i, cmd in enumerate(cmd_list):
             try:
                 log.info(f"[WSL.looper] Running command {i+1}/{len(cmd_list)}...")
-                self.run(cmd, ignore_codes)
+                output = self.run(cmd, ignore_codes)
+                cmd_str = str(cmd)
+                looper_output[cmd_str] = output
             except Exception as e:
                 log.error(f"[WSL.looper] Command failed: {cmd}")
                 raise RuntimeError(e)
+        log.debug(looper_output)
+        return looper_output
 
     def _is_root(self) -> bool:
         """
@@ -409,12 +368,6 @@ class WSL:
             return output == "0"
         except Exception:
             return False
-
-    PASSWORDLESS_SUDO_CMDS = [
-        ["bash", "-c", "echo '[user]\\ndefault=root' | sudo tee /etc/wsl.conf"],
-        ["bash", "-c", "echo 'root ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/root"],
-        ["bash", "-c", "sudo chmod 440 /etc/sudoers.d/root"],
-    ]
 
     def passwordless_sudo(self):
         """
@@ -456,6 +409,11 @@ class WSL:
 if __name__ == "__main__":
     path = Path("C:\\Users\\cblac\\PycharmProjects\\mileslib2\\foobar\\Dockerfile.foobar")
     log.info("foobar")
-    Docker.get_instance()
+    inst = DockerImage.get_instance(path)
+    #inst.uninstall()
+    #WSL.get_instance()
+    #inst.uninstall()
+    #DockerImage.get_instance(path)
+    #Docker.get_instance()
     # DockerImage.get_instance(path, "foobar")
     # user = AzureUserLogin("foobar")
