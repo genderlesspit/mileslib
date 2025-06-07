@@ -1,5 +1,4 @@
 import itertools
-#import pty
 import shutil
 import subprocess
 import sys
@@ -30,7 +29,6 @@ class DockerImage:
         self.base_cmd = ["run", "-i", "--rm", self.image_name]
         found_image = self.find_image()
         if found_image is False or rebuild is True: self.build()
-        #self.run([])
         log.success(f"Docker Image Initialized: {self.uuid}, {self.image_name}")
 
     def find_image(self) -> bool:
@@ -185,6 +183,10 @@ class WSL:
         except Exception as e:
             log.error("WSL installation failed.")
             raise RuntimeError("WSL installation failed.") from e
+
+    @property
+    def dir(self):
+        return Path(r"\\wsl$\Debian\home")
 
     def check_distro(self, distro: str) -> str:
         list_cmd = ["--list", "--quiet"]

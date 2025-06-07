@@ -1,1 +1,2 @@
 import virtual_machines.docker
+import virtual_machines.azure_cli
