@@ -2,8 +2,8 @@ from cli_methods.cli_methods import CLIMethods
 from util import milesutil
 from context import milescontext
 from backend_methods import backend_methods
-from cli_methods import cli_methods
 
+#aliases
 check_types = milesutil.check_types
 write = milesutil.write
 validate_directory = milesutil.validate_directory

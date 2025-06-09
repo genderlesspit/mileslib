@@ -1,7 +1,0 @@
-FROM mcr.microsoft.com/azure-cli
-
-# Optional: Create a persistent profile dir inside container
-VOLUME /root/.azure
-
-# Default command
-CMD ["az", "login", "--use-device-code"]

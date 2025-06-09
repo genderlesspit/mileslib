@@ -1,10 +1,5 @@
-import milesazure
-import mileslib
-from context.milescontext import cache
-from milesazure import ids
 from milesazure.ids import AzureServicePrincipal
-from milesazure.vault import VaultSetup, Secrets
-from pathlib import Path
+
 
 def init_azure(ctx):
     """

@@ -7,7 +7,6 @@ from milesazure.run import run_az
 import milesazure.run as run
 from context import milescontext as mc  # mc.cache is the Cache instance
 from milesazure.tenant import AzureSubscription
-from util.error_handling import recall
 
 logger = logging.getLogger(__name__)
 

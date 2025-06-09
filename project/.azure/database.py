@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 import subprocess
 
 from milesazure.run import run_az
-from milesazure.tenant import AzureSubscription, AzureResourceGroup
+from milesazure.tenant import AzureResourceGroup
 from milesazure.vault import Passwords, Secrets  # for admin password retrieval
 import context.milescontext as mc
 

@@ -1,0 +1,41 @@
+[appconfig]
+app_name = "my-nicegui-app"
+docker_image = "ghcr.io/youruser/my-nicegui-app:latest"
+app_service_name = "my-nicegui-app-service"
+dns_name = "app.mydomain.com"
+redirect_uri = "https://app.mydomain.com/login/callback"
+allowed_origins = ["https://app.mydomain.com", "http://localhost:8080"]
+storage_account_name = "mystorageaccount"
+container_registry_name = "myacr"
+certificate_name = "mycert"
+
+[azure]
+tenant_id = "00000000-0000-0000-0000-000000000000"
+client_id = "11111111-1111-1111-1111-111111111111"
+client_secret = "your-super-secret-client-secret"
+resource_group = "my-resource-group"
+region = "eastus"
+key_vault_name = "my-key-vault"
+db_name = "mydatabase"
+
+[databaseconfig]
+db_name = "mydatabase"
+db_user = "dbadmin"
+db_password = "supersecurepassword"
+db_firewall_ip = "123.456.789.0"
+connection_string = "Server=mydb.postgres.database.azure.com;Database=mydatabase;User Id=dbadmin;Password=supersecurepassword;"
+
+[monitoring]
+app_insights_name = "myappinsights"
+log_analytics_workspace = "my-log-analytics"
+
+[user]
+firstname = "Alice"
+lastname = "Smith"
+title = "DevOps Engineer"
+access_level = "admin"
+username = "asmith"
+password = "p@ssw0rd"
+session = "a12b3c4d"
+email = "alice.smith@example.com"
+phone = "+1234567890"
