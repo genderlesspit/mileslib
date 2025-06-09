@@ -94,6 +94,8 @@ class Docker:
         return output
 
     INSTALL_DOCKER_COMMANDS = [
+        ['apt-get', 'update'],
+        ['apt-get', 'install', '-y', 'curl'],
         ["curl -fsSL https://get.docker.com -o get-docker.sh"],
         ["sudo sh get-docker.sh"],
         ["sudo usermod -aG docker mileslib"],
@@ -112,7 +114,10 @@ class Docker:
         check_cmd = self.base_cmd + ["version", "--format", "{{.Server.Version}}"]
         output = self.wsli.run(check_cmd, ignore_codes=[127, 1], debug=True)
 
-        if "command not found" in output.lower():
+        if "28.2.2" in output.lower():
+            return
+
+        if "command not found" or "'docker' could not be found" in output.lower():
             log.warning("Docker not found. Installing...")
             try:
                 output = self.wsli.looper(self.INSTALL_DOCKER_COMMANDS, ignore_codes=[1])
@@ -342,9 +347,12 @@ class WSL:
             return decoded_output
 
         except Exception:
-            log.exception("[WSL.run_command] Failed to execute command.")
-            log.error(process.stderr)
-            raise
+            log.error("WSL Command Failed!")
+            log.error(f"CMD: {real_cmd}")
+            log.error(f"DECODED OUTPUT: {decoded_output}")
+            log.error(f"STDOUT: {process.stdout}")
+            log.error(f"STDERR: {process.stderr}")
+            raise RuntimeError
 
         finally:
             spinner_running = False
