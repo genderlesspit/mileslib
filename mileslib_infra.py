@@ -7,8 +7,8 @@ from typing import List, Dict, Optional, Any
 
 import requests
 import toml
-from azure.mgmt.keyvault.v2024_11_01.models import Sku
 from loguru import logger as log
+
 
 class Project:
     def __init__(self, name, path, cfg_file):
@@ -50,9 +50,10 @@ class Project:
     def key_vault(self):
         return KeyVault(self)
 
+
 class AzureUser:
-    def __init__(self, project):
-        self.project = project
+    def __init__(self, _project):
+        self.project = _project
         _ = self.metadata
 
     @cached_property
@@ -103,9 +104,10 @@ class AzureUser:
             expect_json=True)
         return self._GraphToken(**token_metadata)
 
+
 class GraphAPI:
-    def __init__(self, project: Project, version: str = "v1.0"):
-        self.project = project
+    def __init__(self, _project: Project, version: str = "v1.0"):
+        self.project = _project
         self.token = self.project.azure_user.graph_token
         self.version = version.strip("/")
 
@@ -142,8 +144,8 @@ class GraphAPI:
 
 
 class ServicePrincipal:
-    def __init__(self, project: Project):
-        self.project = project
+    def __init__(self, _project: Project):
+        self.project = _project
         self.azure_user = self.project.azure_user
         self.client_id = self.metadata.appId
         self.client_secret = self.metadata.password
@@ -159,17 +161,21 @@ class ServicePrincipal:
 
     @cached_property
     def metadata(self):
-        data = self.azure_user.azure_cli.run(f"az ad sp create-for-rbac -n mileslib --role Contributor --scope /subscriptions/{self.azure_user.subscription_id}",
-        headless=True, expect_json=False)
+        data = self.azure_user.azure_cli.run(
+            f"az ad sp create-for-rbac -n mileslib --role Contributor --scope /subscriptions/{self.azure_user.subscription_id}",
+            headless=True, expect_json=False)
         if "Found an existing application instance (id)" in data:
             parts = data.split("(id) ")[1]
             extracted_id = parts.split(".")[0].strip()
-            data = self.project.azure_user.azure_cli.run(f"az ad sp show --id {extracted_id}", headless=True, expect_json=True)
+            data = self.project.azure_user.azure_cli.run(f"az ad sp show --id {extracted_id}", headless=True,
+                                                         expect_json=True)
             return self._Metadata(**data)
         json_match = re.search(r"\{.*}", data, re.DOTALL)
         if not json_match: raise ValueError("No JSON object found in output.")
-        try: parsed_data = json.loads(json_match.group(0))
-        except json.JSONDecodeError as e: raise ValueError("Failed to parse JSON content.") from e
+        try:
+            parsed_data = json.loads(json_match.group(0))
+        except json.JSONDecodeError as e:
+            raise ValueError("Failed to parse JSON content.") from e
         return self._Metadata(**parsed_data)
 
     @cached_property
@@ -178,9 +184,10 @@ class ServicePrincipal:
         cred = SPCredentials(self.tenant_id, self.client_id, self.client_secret)
         return AzureCLI.get_instance(Global.get_instance(), user=False, credentials=cred)
 
+
 class AzureResourceGroup:
-    def __init__(self, project: Project):
-        self.project = project
+    def __init__(self, _project: Project):
+        self.project = _project
         self.rg_name = f"{self.project.name}-rg"
         self.region = "westus"
 
@@ -200,10 +207,12 @@ class AzureResourceGroup:
                                                      headless=True, expect_json=True)
         return self._Metadata(**data)
 
+
 @dataclass
 class Sku:
     family: str
     name: str
+
 
 @dataclass
 class SystemData:
@@ -213,6 +222,7 @@ class SystemData:
     lastModifiedAt: str
     lastModifiedBy: str
     lastModifiedByType: str
+
 
 @dataclass
 class Properties:
@@ -234,9 +244,10 @@ class Properties:
     tenantId: str
     vaultUri: str
 
+
 class KeyVault:
-    def __init__(self, project: Project):
-        self.project = project
+    def __init__(self, _project: Project):
+        self.project = _project
         self.name = f"{self.project.name}-vault"
         self.location = self.project.azure_resource_group.region
         self.rg = self.project.azure_resource_group.rg_name
@@ -257,9 +268,12 @@ class KeyVault:
         self.project.service_principal.azure_cli.run(
             f"az keyvault create --location {self.location} --name {self.name} --resource-group {self.rg}",
             headless=True, expect_json=False)
-        data = self.project.service_principal.azure_cli.run(f"az keyvault show --name {self.name}", headless=True, expect_json=True)
+        data = self.project.service_principal.azure_cli.run(f"az keyvault show --name {self.name}", headless=True,
+                                                            expect_json=True)
         log.debug(data)
         return KeyVault._Metadata(**data)
+
+
 
 @dataclass
 class ZoomInfoAPI:
@@ -267,9 +281,11 @@ class ZoomInfoAPI:
     base_url: str
     rate_limit_per_minute: int
 
+
 @cached_property
 def zoominfo_api(self):
-    return Project.ZoomInfoAPI(**self.server_toml["zoominfo_api"])
+    return ZoomInfoAPI(**self.server_toml["zoominfo_api"])
+
 
 @dataclass
 class Database:
@@ -282,7 +298,7 @@ class Database:
 
 @cached_property
 def database_config(self):
-    return Project.Database(**self.server_toml["database"])
+    return Database(**self.server_toml["database"])
 
 
 # @dataclass
@@ -326,6 +342,6 @@ class Global:
 if __name__ == "__main__":
     glo = Global.get_instance()
     project = glo.projects["project"]
-    #log.debug(project.azure_resource_group.metadata)
-    #log.debug(project.azure_user.azure_cli.azure_profile)
+    # log.debug(project.azure_resource_group.metadata)
+    # log.debug(project.azure_user.azure_cli.azure_profile)
     log.debug(project.key_vault.metadata)
