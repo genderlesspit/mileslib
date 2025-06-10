@@ -1,5 +1,6 @@
 import json
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import List, Dict, Optional, Any
 import requests
 import toml
 from loguru import logger as log
+from sqlalchemy import String, create_engine
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, sessionmaker
 
 
 class Project:
@@ -49,6 +52,14 @@ class Project:
     @cached_property
     def key_vault(self):
         return KeyVault(self)
+
+    @cached_property
+    def sqlite(self):
+        return SQLite(self)
+
+    @cached_property
+    def sqlite_orm(self):
+        return SQLiteORM(self)
 
 
 class AzureUser:
@@ -274,37 +285,41 @@ class KeyVault:
         return KeyVault._Metadata(**data)
 
 
-
-@dataclass
-class ZoomInfoAPI:
-    api_key: str
-    base_url: str
-    rate_limit_per_minute: int
+class Base(DeclarativeBase):
+    pass
 
 
-@cached_property
-def zoominfo_api(self):
-    return ZoomInfoAPI(**self.server_toml["zoominfo_api"])
+class Config(Base):
+    __tablename__ = "config"
+
+    key: Mapped[str] = mapped_column(primary_key=True)
+    value: Mapped[str] = mapped_column(String)
 
 
-@dataclass
-class Database:
-    db_name: str
-    db_user: str
-    db_password: str
-    db_firewall_ip: str
-    connection_string: str
+class SQLite:
+    def __init__(self, _project: Project):
+        self.project = _project
+        self.path = self.project.path / "mileslib.db"
 
 
-@cached_property
-def database_config(self):
-    return Database(**self.server_toml["database"])
+class SQLiteORM:
+    def __init__(self, _project: Project):
+        self.project = _project
+        self.engine = create_engine(f"sqlite:///{self.project.sqlite.path}")
+        Base.metadata.create_all(self.engine)
+        self._Session = sessionmaker(bind=self.engine)
 
-
-# @dataclass
-# class Monitoring:
-#    app_insights_name: str
-#    log_analytics_workspace: str
+    @contextmanager
+    def session(self):
+        session = self._Session()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
 
 class Global:
@@ -344,4 +359,5 @@ if __name__ == "__main__":
     project = glo.projects["project"]
     # log.debug(project.azure_resource_group.metadata)
     # log.debug(project.azure_user.azure_cli.azure_profile)
-    log.debug(project.key_vault.metadata)
+    # log.debug(project.key_vault.metadata)
+    log.debug(project.sqlite_orm)
