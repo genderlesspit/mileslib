@@ -152,7 +152,7 @@ class WSL:
                 "-d", self.distro,  # "-d Debian"
                 "-u", "root",  # <— force root every time
                 "--", "bash",  # "--exec bash"
-                "-ic"  # "-c" so we can pass a single command string
+                "-c"  # "-c" so we can pass a single command string
             ]
             log.debug(self.run(['adduser --disabled-password --gecos "" mileslib'], ignore_codes=[1], debug=False))
         else:
@@ -161,7 +161,7 @@ class WSL:
                 "-d", self.distro,  # "-d Debian"
                 "-u", "mileslib",  # <— force root every time
                 "--", "bash",  # "--exec bash"
-                "-ic"  # "-c" so we can pass a single command string
+                "-c"  # "-c" so we can pass a single command string
             ]
         log.success(f"WSL Instance Initialized: {self.uuid}, {self.distro}, root: {root}")
 

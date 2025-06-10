@@ -45,7 +45,7 @@ class Provision:
 
     class PostgreSQL:
         """
-        Create Azure Database for PostgreSQL Flexible Server and default database for Django.
+        Create Azure Database for PostgreSQL Flexible Project and default database for Django.
         """
 
         @staticmethod
@@ -55,7 +55,7 @@ class Provision:
             admin_password: str
         ) -> Dict[str, str]:
             """
-            Create or validate a PostgreSQL Flexible Server for `project`.
+            Create or validate a PostgreSQL Flexible Project for `project`.
 
             Variables:
                 sub_id: str
@@ -72,9 +72,9 @@ class Provision:
                 3. Determine:
                    - server_name = f"{project}-psql"
                    - db_name     = f"{project}db"
-                   - sku         = "Standard_B1ms" (Flexible Server SKU)
+                   - sku         = "Standard_B1ms" (Flexible Project SKU)
                    - tier        = "Burstable"
-                4. Call run_az to create a Flexible Server (idempotent).
+                4. Call run_az to create a Flexible Project (idempotent).
                 5. Call run_az to configure firewall rule to allow Azure services.
                 6. Call run_az to create default database.
                 7. Return a dict with:
