@@ -1,48 +1,61 @@
 from dataclasses import dataclass
 from functools import cached_property
+from typing import Optional
 from uuid import uuid4
 
-from nicegui import ui
-from sqlalchemy import String, ForeignKey, select
-from sqlalchemy.orm import mapped_column, relationship
-
-from loguru import logger as log
+from sqlalchemy import String, select
+from sqlalchemy.orm import mapped_column, Mapped
 
 import mileslib_infra
 from mileslib_infra import Base
 
 
 @dataclass
+class UserDefaults:
+    authenticated: bool
+    user: str | None
+
+
 class Users(Base):
     __tablename__ = "users"
-    __allow_unmapped__ = True
 
-    uuid: str = mapped_column(primary_key=True)
-    username: str = mapped_column(String, unique=True, nullable=False)
-    email: str = mapped_column(String, unique=True, nullable=False)
-    password: str = mapped_column(String, nullable=False)  # can be placeholder if using AAD
-    access_level: str = mapped_column(String)
-    phone: str = mapped_column(String, nullable=True)
-    firstname: str = mapped_column(String)
-    lastname: str = mapped_column(String)
-    title: str = mapped_column(String)
+    uuid: Mapped[str] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    password: Mapped[str] = mapped_column(String, nullable=False)
+    access_level: Mapped[str] = mapped_column(String)
+    phone: Mapped[str] = mapped_column(String, nullable=True)
+    firstname: Mapped[str] = mapped_column(String)
+    lastname: Mapped[str] = mapped_column(String)
+    title: Mapped[str] = mapped_column(String)
 
-    # Relationship to sessions
-    sessions: list["Sessions"] = relationship("Sessions", back_populates="user")
+    def to_dict(self) -> dict:
+        return {
+            "uuid": self.uuid,
+            "username": self.username,
+            "email": self.email,
+            "access_level": self.access_level,
+            "phone": self.phone,
+            "firstname": self.firstname,
+            "lastname": self.lastname,
+            "title": self.title
+        }
 
 
 @dataclass
-class Sessions(Base):
-    __tablename__ = "sessions"
-    __allow_unmapped__ = True
+class UserDTO:
+    uuid: str
+    username: str
+    email: str
+    access_level: str
+    phone: Optional[str]
+    firstname: str
+    lastname: str
+    title: str
 
-    id: str = mapped_column(primary_key=True)  # ui.context.session.id
-    user_uuid: str = mapped_column(ForeignKey("users.uuid"))
-    access_token: str = mapped_column(String)
-    expires_at: str = mapped_column(String)
-
-    # Relationship back to user
-    user: Users = relationship("Users", back_populates="sessions")
+    @classmethod
+    def from_orm(cls, user: Users) -> "UserDTO":
+        return cls(**user.to_dict())
 
 
 class Client:
@@ -50,73 +63,54 @@ class Client:
     PROJECT = GLOBAL.projects["project"]
     clients = {}
 
-    def __init__(self, client_id):
-        self.client_id = client_id
+    def __init__(self, client_session_uuid: str, client_metadata: UserDefaults, email, password):
+        self.client_session_uuid = client_session_uuid
+        self.client_metadata = client_metadata
+        self.email = email
+        self.password = password
         self.db = self.PROJECT.sqlite_orm.session
+        _ = self.user
+        self.client_metadata = UserDefaults(authenticated=True, user=self.user["uuid"])
 
     @classmethod
-    def get(cls, client_id):
-        if client_id not in cls.clients:
-            cls.clients[client_id] = cls(client_id)
-        return cls.clients[client_id]
+    def get(cls, client_session_uuid: str, client_metadata: UserDefaults, email: str, password: str):
+        if client_session_uuid not in cls.clients:
+            cls.clients[client_session_uuid] = cls(client_session_uuid, client_metadata, email, password)
+        return cls.clients[client_session_uuid]
 
     @cached_property
-    def session(self) -> Sessions | None:
-        with self.db() as session:
-            return session.get(Sessions, self.client_id)
-
-    @cached_property
-    def user(self) -> Users:
-        _user = self.session.user if self.session else None
-        if _user is None: raise PermissionError
-        return _user
-
-    def set_cookie(self, uuid: str):
-        if not uuid:
-            raise RuntimeError("Invalid UUID for cookie")
-        ui.context.client.cookies['client_id'] = uuid
-
-    def get_cookie(self, uuid: str) -> str | None:
-        cookie = ui.context.client.cookies.get('client_id')
-        if cookie != self.uuid: raise PermissionError
-        return cookie
-
-    def login(self, email, password) -> str:
-        if not email.endswith('@phazebreak.com'):
+    def user(self) -> dict:
+        if not self.email.endswith('@phazebreak.com'):
             raise PermissionError
 
         with self.db() as session:
-            stmt = select(Users).where(Users.email == email)
+            stmt = select(Users).where(Users.email == self.email)
             user = session.execute(stmt).scalar_one_or_none()
-
             if not user:
-                return self.signup(email, password)
-
-            if user.password != password:
+                return self.signup()
+            if user.password != self.password:
                 raise PermissionError
+            session.refresh(user)
 
-            self.set_cookie(user.uuid)
-            return user.uuid
+            user = UserDTO.from_orm(user)
+            return user.__dict__
 
-    def signup(self, email: str, password: str) -> str:
+    def signup(self) -> dict:
         user = Users(
             uuid=str(uuid4()),
-            email=email,
-            username=email.split("@")[0],
-            password=password,
+            email=self.email,
+            username=self.email.split("@")[0],
+            password=self.password,
             access_level="user",
             firstname="",
             lastname="",
             phone="",
             title=""
         )
-        session_obj = Sessions(
-            id=self.client_id,
-            user_uuid=user.uuid,
-            access_token="mock-token",
-            expires_at="never"
-        )
+        with self.db() as session:
+            session.add(user)
+            session.commit()
+            session.refresh(user)
 
-        self.set_cookie(user.uuid)
-        return user.uuid
-
+        user = UserDTO.from_orm(user)
+        return user.__dict__
