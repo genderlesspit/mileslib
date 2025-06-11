@@ -1,22 +1,45 @@
-import json
-import threading
-import time
+import os
+import threading, time, requests, json, logging, uvicorn
+from functools import cached_property
 
-import requests
-import uvicorn
 from fastapi import FastAPI
-from starlette.responses import HTMLResponse, JSONResponse
-
+from fastapi.responses import JSONResponse
 from loguru import logger as log
 
 class Routes:
-    def hello(self): return {"msg": "Hello"}
-    def goodbye(self): return {"msg": "Goodbye"}
+    def hello(self): return JSONResponse({"msg": "Hello"})
+    def goodbye(self): return JSONResponse({"msg": "Goodbye"})
 
 class Server:
-    _started = False
+    instance = None
     app = FastAPI()
     routes = Routes()
+
+    def __init__(self, host: str, port: int):
+        if not isinstance(host, str): raise TypeError
+        if not isinstance(port, int): raise TypeError
+        self.host = host
+        self.port = port
+        threading.Thread(target=lambda: uvicorn.run(self.app, host=self.host, port=self.port, log_level="warning"),
+                         daemon=True).start()
+        _ = self.url
+        _ = self.test_connection
+
+    @cached_property
+    def url(self):
+        return f"http://{self.host}:{self.port}"
+
+    @property
+    def test_connection(self):
+        response = None
+        for _ in range(10):
+            try:
+                response = requests.get(f"{self.url}/healthz")
+                if response.status_code == 200: break
+            except:
+                time.sleep(0.2)
+        if response is None: raise ConnectionError
+        return response.status_code
 
     for name in dir(routes):
         if not name.startswith("_"):
@@ -32,28 +55,44 @@ class Server:
     @app.get("/healthz")
     def healthz(): return JSONResponse({"status": "ok"})
 
-    @classmethod
-    def get(cls):
-        if cls._started: return cls.app
-        cls._started = True
-        threading.Thread(target=lambda: uvicorn.run(cls.app, host="127.0.0.1", port=6969, log_level="warning"), daemon=True).start()
-        for _ in range(10):
-            try:
-                health = requests.get("http://127.0.0.1:6969/healthz").status_code
-                log.debug(health)
-                if health == 200: break
-            except: time.sleep(0.2)
-        return cls.app
-
     @staticmethod
-    def request(route: str):
-        domain = "http://127.0.0.1:6969"
-        url = domain + route
-        response = requests.get(url).content
-        if response is JSONResponse: response = json.load(response)
-        log.debug(response)
-        return response
+    @app.post("/shutdown")
+    def shutdown():
+        threading.Thread(target=lambda: os._exit(0), daemon=True).start()
+        return JSONResponse({"status": "shutting down"})
+
+    @classmethod
+    def get(cls, host, port):
+        if cls.instance:
+            log.debug(f"[HTMX Server] Already started on {cls.instance.host}:{cls.instance.port}")
+            return cls.instance.app
+        cls.instance = cls(host, port)
+        return cls.instance
+
+    @classmethod
+    def kill(cls):
+        if not cls.instance:
+            log.warning("[HTMX Server] Kill failed. No server instance running.")
+            return
+        cls._started = False
+        try:
+            response = requests.post("http://127.0.0.1:6969/shutdown")
+            return log.debug(response.status_code)
+        except Exception: pass
+
+    def request(self, route: str):
+        url = f"{self.url}{route}"
+        try:
+            response = requests.get(url)
+            log.debug(f"[GET {route} | {response.status_code}]: {response.text}")
+            return response.json() if "application/json" in response.headers.get("content-type", "") else response.text
+        except Exception as e:
+            log.error(f"Request to {route} failed: {e}")
+            return None
 
 if __name__ == "__main__":
-    Server.get()
-    Server.request("/hello")
+    server = Server.get("127.0.0.1", 6969)
+    log.debug(server)
+    log.debug(server.request("/hello"))
+    server.kill()
+    server.request("/hello")
