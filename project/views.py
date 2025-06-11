@@ -10,8 +10,10 @@ PROJECT = GLOBAL.projects["project"]
 
 @ui.page('/')
 def client():
-    client_session_uuid = ui.context.client.id
-    user_defaults = UserDefaults(authenticated=False, user=None)
+    client_session_uuid = app.storage.browser['id']
+    log.debug(client_session_uuid)
+    user_defaults = app.storage.user.setdefault(client_session_uuid,
+                                                UserDefaults(authenticated=False, user=None).__dict__)
     current_client_session = app.storage.user.get(client_session_uuid)
     if current_client_session["authenticated"] is False: ui.navigate.to('/login')
 
@@ -20,7 +22,7 @@ def client():
 def login():
     email = ui.input(label='Email')
     password = ui.input(label='Password', password=True)
-    client_session_uuid = ui.context.client.id
+    client_session_uuid = app.storage.browser['id']
     current_client_session = app.storage.user.get(client_session_uuid)
 
     def submit():
@@ -31,7 +33,7 @@ def login():
                 "user": _client.user["uuid"],
                 "email": _client.user["email"],
             }
-            AuthenticatedUser.new(current_client_session, _client)
+            AuthenticatedUser.new(client_session_uuid, _client)
             ui.navigate.to('/home')
         except Exception as e:
             log.exception(e)
@@ -47,22 +49,22 @@ class AuthenticatedUser:
         self.metadata = _client
 
     @classmethod
-    def new(cls, current_client_session, _client: Client = None):
-        if not cls.instances[current_client_session]:
-            cls.instances[current_client_session] = cls(_client)
-        return cls.instances[current_client_session]
+    def new(cls, client_session_uuid, _client: Client = None):
+        if client_session_uuid not in cls.instances:
+            cls.instances[client_session_uuid] = cls(_client)
+        return cls.instances[client_session_uuid]
 
     @classmethod
-    def get(cls, current_client_session):
-        if not cls.instances[current_client_session]: raise KeyError
-        return cls.instances[current_client_session]
+    def get(cls, client_session_uuid):
+        if client_session_uuid not in cls.instances: raise KeyError
+        return cls.instances[client_session_uuid]
 
 
 @ui.page('/home')
 def home():
-    client_session_uuid = ui.context.client.id
+    client_session_uuid = app.storage.browser['id']
     current_client_session = app.storage.user.get(client_session_uuid)
-    user = AuthenticatedUser.get(current_client_session)
+    user = AuthenticatedUser.get(client_session_uuid)
 
     with ui.tabs().classes('w-full') as tabs:
         user_tab = ui.tab("User")
