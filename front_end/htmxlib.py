@@ -1,46 +1,45 @@
 import os
-import requests
 import threading
 import time
 import uuid
-import uvicorn
 from functools import cached_property
 
+import requests
+import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from loguru import logger as log
 
-class Templates:
-    pass
-
-
-class Routes:
-    def _hello(self): return JSONResponse({"msg": "test"})
-
-
-class Server:
+class HTMXServer:
     instance = None
     app = FastAPI()
-    routes = Routes()
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, _project, host: str, port: int):
         if not isinstance(host, str): raise TypeError
         if not isinstance(port, int): raise TypeError
         self.uuid = uuid.uuid4()
+        self.project = _project
         self.host = host
         self.port = port
         _ = self.thread
         _ = self.url
+        _ = self.routes
+        self.templates = self.project.templates
         log.success(f"HTMX Server successfully initialized: {self.uuid}, speed: {self.test_connection}ms")
 
     @cached_property
     def url(self):
         return f"http://{self.host}:{self.port}"
 
+    @cached_property
+    def meta(self) -> str:
+        return f'<script>window.HTMX_SERVER = "{self.url}";</script>'
+
     @property
     def thread(self):
-        thread = threading.Thread(target=lambda: uvicorn.run(self.app, host=self.host, port=self.port, log_level="warning"),
-                         daemon=True)
+        thread = threading.Thread(
+            target=lambda: uvicorn.run(self.app, host=self.host, port=self.port, log_level="warning"),
+            daemon=True)
         if not thread.is_alive():
             log.warning("[HTMX Server] Server not found... Launching...")
             thread.start()
@@ -62,12 +61,15 @@ class Server:
                 time.sleep(0.05)  # 50ms backoff
         raise ConnectionError
 
-    for name in dir(routes):
-        if not name.startswith("_"):
-            fn = getattr(routes, name)
+    @cached_property
+    def routes(self):
+        routes = self.project.templates.routes
+        for name in routes:
+            fn = self.project.templates.routes[name]
             if callable(fn):
-                app.get(f"/{name}")(fn)
+                self.app.get(f"/{name}")(fn)
                 log.debug(f"[HTMX Server] Route '/{name}' initialized.")
+        return routes
 
     @staticmethod
     @app.get("/")
@@ -86,11 +88,11 @@ class Server:
         return JSONResponse({"status": "shutting down"})
 
     @classmethod
-    def get(cls, host, port):
+    def get(cls, _project, host, port):
         if cls.instance:
             log.debug(f"[HTMX Server] Already started on {cls.instance.host}:{cls.instance.port}")
             return cls.instance.app
-        cls.instance = cls(host, port)
+        cls.instance = cls(_project, host, port)
         return cls.instance
 
     @classmethod
@@ -113,7 +115,3 @@ class Server:
         except Exception as e:
             log.error(f"Request to {route} failed: {e}")
             return None
-
-
-if __name__ == "__main__":
-    server = Server.get("127.0.0.1", 6969)

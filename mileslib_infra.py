@@ -18,6 +18,8 @@ class Project:
         self.name = name
         self.path = path
         self.cfg_file = cfg_file
+        self.htmx_host = "127.0.0.1"
+        self.htmx_port = 6969
 
     @cached_property
     def server_toml(self) -> dict:
@@ -61,6 +63,15 @@ class Project:
     def sqlite_orm(self):
         return SQLiteORM(self)
 
+    @cached_property
+    def templates(self):
+        from front_end.templates import Templates
+        return Templates(self)
+
+    @cached_property
+    def htmx_server(self):
+        from front_end.htmxlib import HTMXServer
+        return HTMXServer.get(self, self.htmx_host, self.htmx_port)
 
 class AzureUser:
     def __init__(self, _project):
@@ -360,4 +371,6 @@ if __name__ == "__main__":
     # log.debug(project.azure_resource_group.metadata)
     # log.debug(project.azure_user.azure_cli.azure_profile)
     # log.debug(project.key_vault.metadata)
-    log.debug(project.sqlite_orm)
+    log.debug(project.templates.routes)
+    log.debug(project.htmx_server.routes)
+    project.htmx_server.request("/user")
