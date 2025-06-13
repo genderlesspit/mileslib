@@ -22,6 +22,14 @@ class Project:
         self.htmx_port = 6969
         self.views_host = "127.0.0.1"
         self.views_port = 6970
+        self.cloudflare_account = ""
+        self.cloudflare_zone = ""
+        self.domain = "phazebreak.work"
+
+
+    @cached_property
+    def mileslib(self):
+        return Global.get_instance()
 
     @cached_property
     def server_toml(self) -> dict:
@@ -79,6 +87,16 @@ class Project:
     def views(self):
         from front_end.views import Views
         return Views.get(self, self.views_host, self.views_port)
+
+    @cached_property
+    def dns(self):
+        from virtual_machines.cloudflared_cli import DNS
+        return DNS.new(self, input("Input Cloudflare API Token ... Pls ....")
+
+    @cached_property
+    def cloudflared_cli(self):
+        from virtual_machines.cloudflared_cli import CloudflaredCLI
+        return CloudflaredCLI.get_instance(self)
 
 class AzureUser:
     def __init__(self, _project):
@@ -375,11 +393,4 @@ class Global:
 if __name__ == "__main__":
     glo = Global.get_instance()
     project = glo.projects["project"]
-    # log.debug(project.azure_resource_group.metadata)
-    # log.debug(project.azure_user.azure_cli.azure_profile)
-    # log.debug(project.key_vault.metadata)
-    log.debug(project.templates.routes)
-    log.debug(project.templates.templates_dict)
-    log.debug(project.htmx_server.routes)
-    project.htmx_server.request("/user")
-    views = project.views
+    project.cloudflared_cli.start(project)

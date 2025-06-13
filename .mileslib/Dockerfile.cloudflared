@@ -1,0 +1,22 @@
+FROM debian:bullseye-slim
+
+# Metadata
+LABEL maintainer="MilesLib"
+LABEL description="Cloudflared CLI Docker Container"
+
+# Install required packages
+RUN apt-get update && \
+    apt-get install -y curl gnupg && \
+    curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb && \
+    dpkg -i /tmp/cloudflared.deb && \
+    rm /tmp/cloudflared.deb && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set up working directory and default user
+WORKDIR /app
+ENV HOME=/root
+ENV CLOUDFLARED_HOME=/root/.cloudflared
+
+# Entrypoint fallback (can be overridden by CMD)
+ENTRYPOINT ["cloudflared"]

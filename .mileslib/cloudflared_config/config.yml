@@ -1,0 +1,7 @@
+tunnel: project
+credentials-file: /root/.cloudflared/ca89ad5a-5ef2-4784-8448-3b2ed2006041.json
+
+ingress:
+  - hostname: phazebreak.work
+    service: http://localhost:6970
+  - service: http_status:404
