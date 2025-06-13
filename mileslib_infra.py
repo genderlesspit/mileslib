@@ -91,7 +91,7 @@ class Project:
     @cached_property
     def dns(self):
         from virtual_machines.cloudflared_cli import DNS
-        return DNS.new(self, input("Input Cloudflare API Token ... Pls ....")
+        return DNS.new(self, input("Input Cloudflare API Token ... Pls ...."))
 
     @cached_property
     def cloudflared_cli(self):
