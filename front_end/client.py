@@ -9,6 +9,8 @@ from sqlalchemy.orm import mapped_column, Mapped
 import mileslib_infra
 from mileslib_infra import Base
 
+from loguru import logger as log
+
 
 @dataclass
 class UserDefaults:
@@ -63,19 +65,26 @@ class Client:
     PROJECT = GLOBAL.projects["project"]
     clients = {}
 
-    def __init__(self, client_session_uuid: str, client_metadata: UserDefaults, email, password):
+    def __init__(self, client_session_uuid: str, email, password):
         self.client_session_uuid = client_session_uuid
-        self.client_metadata = client_metadata
         self.email = email
         self.password = password
+        log.debug(f"[Client] Attempting to initialize client at {self.client_session_uuid} with {self.email}")
         self.db = self.PROJECT.sqlite_orm.session
+        log.debug(f"[Client] Attempting to retrieve user information from {self.PROJECT.sqlite.path}")
         _ = self.user
+        log.debug(f"[Client] Retrieved user information: {self.user}")
         self.client_metadata = UserDefaults(authenticated=True, user=self.user["uuid"])
 
     @classmethod
-    def get(cls, client_session_uuid: str, client_metadata: UserDefaults, email: str, password: str):
-        if client_session_uuid not in cls.clients:
-            cls.clients[client_session_uuid] = cls(client_session_uuid, client_metadata, email, password)
+    def get(cls, client_session_uuid: str):
+        if client_session_uuid not in cls.clients: raise PermissionError
+        return cls.clients[client_session_uuid]
+
+    @classmethod
+    def new(cls, client_session_uuid: str, email, password):
+        if client_session_uuid in cls.clients: return cls.clients[client_session_uuid]
+        cls.clients[client_session_uuid] = cls(client_session_uuid, email, password)
         return cls.clients[client_session_uuid]
 
     @cached_property

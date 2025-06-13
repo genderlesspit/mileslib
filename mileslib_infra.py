@@ -20,6 +20,8 @@ class Project:
         self.cfg_file = cfg_file
         self.htmx_host = "127.0.0.1"
         self.htmx_port = 6969
+        self.views_host = "127.0.0.1"
+        self.views_port = 6970
 
     @cached_property
     def server_toml(self) -> dict:
@@ -72,6 +74,11 @@ class Project:
     def htmx_server(self):
         from front_end.htmxlib import HTMXServer
         return HTMXServer.get(self, self.htmx_host, self.htmx_port)
+
+    @cached_property
+    def views(self):
+        from front_end.views import Views
+        return Views.get(self, self.views_host, self.views_port)
 
 class AzureUser:
     def __init__(self, _project):
@@ -372,5 +379,7 @@ if __name__ == "__main__":
     # log.debug(project.azure_user.azure_cli.azure_profile)
     # log.debug(project.key_vault.metadata)
     log.debug(project.templates.routes)
+    log.debug(project.templates.templates_dict)
     log.debug(project.htmx_server.routes)
     project.htmx_server.request("/user")
+    views = project.views
